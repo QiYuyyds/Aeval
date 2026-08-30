@@ -261,7 +261,7 @@ async def _stream_events(run_id: str):
                 event = await asyncio.wait_for(
                     queue.get(), timeout=_STREAM_HEARTBEAT_SECONDS
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield {"comment": "heartbeat"}
                 continue
             yield {"data": json.dumps(event, default=str)}

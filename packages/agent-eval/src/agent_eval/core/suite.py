@@ -13,8 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from agent_eval.core.types import EvalSuite
 from pydantic import ValidationError
+
+from agent_eval.core.types import EvalSuite
 
 
 class SuiteLoadError(Exception):

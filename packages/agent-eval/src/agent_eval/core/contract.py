@@ -27,7 +27,6 @@ from agent_eval.core.types import (
     TrialResult,
 )
 
-
 # ─── Errors ───────────────────────────────────────────────────────────────────
 
 

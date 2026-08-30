@@ -8,7 +8,6 @@ LLM 未配置 503。
 import json
 
 import httpx
-import pytest
 
 from agent_eval.api.app import create_app as create_eval_app
 from agent_eval.core.runner import EvalRunner

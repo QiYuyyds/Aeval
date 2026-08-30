@@ -24,6 +24,9 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+
 from agent_eval.dataset.models import (
     DatasetError,
     EvalDataset,
@@ -36,8 +39,6 @@ from agent_eval.dataset.sources.manual import import_from_content
 from agent_eval.dataset.sources.regression import RegressionExtractor
 from agent_eval.dataset.sources.trace_mining import TraceMiner
 from agent_eval.dataset.version import DatasetVersionManager
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
 
 router = APIRouter()
 

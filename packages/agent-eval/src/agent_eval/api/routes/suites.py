@@ -9,8 +9,9 @@ DELETE /suites/{name}  — Delete a suite
 
 from __future__ import annotations
 
-from agent_eval.core.types import EvalSuite
 from fastapi import APIRouter, HTTPException
+
+from agent_eval.core.types import EvalSuite
 
 router = APIRouter()
 

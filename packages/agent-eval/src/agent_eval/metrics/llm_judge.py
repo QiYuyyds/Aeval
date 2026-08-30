@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 # LLM 函数协议: (system_prompt, user_message) → raw text
 LLMFn = Callable[[str, str], Awaitable[str]]

@@ -19,13 +19,14 @@ Requires either:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from agent_eval.core.contract import EvalContext, Grader
-from agent_eval.core.types import GraderResult, GraderType, EvalTask, TrialResult
-
+from agent_eval.core.contract import EvalContext
+from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
 
 # Type alias for LLM function: (system_prompt, user_message) -> str
 LLMFn = Callable[[str, str], str]
@@ -136,10 +137,8 @@ class ModelBasedGrader:
                 parsed = json.loads(json_str)
                 for dim in dimensions:
                     if dim in parsed:
-                        try:
+                        with contextlib.suppress(ValueError, TypeError):
                             scores[dim] = float(parsed[dim])
-                        except (ValueError, TypeError):
-                            pass
         except json.JSONDecodeError:
             pass
 
@@ -169,11 +168,11 @@ class ModelBasedGrader:
                     max_tokens=500,
                 )
                 return resp.choices[0].message.content or ""
-            except ImportError:
+            except ImportError as e:
                 raise RuntimeError(
                     "openai package not installed. "
                     "Install with: pip install openai"
-                )
+                ) from e
             except Exception as e:
                 raise RuntimeError(f"OpenAI API call failed: {e}") from e
 

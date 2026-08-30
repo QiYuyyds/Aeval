@@ -12,15 +12,12 @@ import asyncio
 import json
 
 import httpx
-import pytest
-from agent_eval.api.app import create_app as create_eval_app
+from test_api import SAMPLE_SUITE, make_eval_client, make_runner
+
 from agent_eval.api.events import RunEventBus, run_event_bus
 from agent_eval.core.runner import EvalRunner
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.storage.memory import MemoryStorage
-
-from test_api import SAMPLE_SUITE, make_eval_client, make_runner
-
 
 # ─── RunEventBus 单元 ────────────────────────────────────────────────────────
 
@@ -63,8 +60,7 @@ class TestRunEventBus:
         for i in range(300):
             bus.publish("r1", "task_start", {"seq": i})
         assert q.qsize() <= 256
-        # 最新事件仍在 (丢的是最旧的)
-        latest = json.dumps({})  # 占位; 直接消费到尾
+        # 最新事件仍在 (丢的是最旧的): 消费到尾
         while q.qsize() > 1:
             q.get_nowait()
         assert q.get_nowait()["seq"] == 299

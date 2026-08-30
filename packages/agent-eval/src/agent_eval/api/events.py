@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import OrderedDict
 from typing import Any
@@ -85,14 +86,10 @@ def _offer(queue: asyncio.Queue, event: dict[str, Any]) -> None:
     try:
         queue.put_nowait(event)
     except asyncio.QueueFull:
-        try:
+        with contextlib.suppress(asyncio.QueueEmpty):
             queue.get_nowait()
-        except asyncio.QueueEmpty:
-            pass
-        try:
+        with contextlib.suppress(asyncio.QueueFull):  # pragma: no cover - 理论不可达
             queue.put_nowait(event)
-        except asyncio.QueueFull:  # pragma: no cover - 理论不可达
-            pass
 
 
 # 全局单例 (与 eval API 子应用同生命周期)

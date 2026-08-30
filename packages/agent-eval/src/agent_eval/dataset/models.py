@@ -14,8 +14,9 @@ import uuid
 from enum import Enum
 from typing import Any
 
-from agent_eval.core.types import EvalSuite, EvalTask, GraderConfig
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+from agent_eval.core.types import EvalSuite, EvalTask, GraderConfig
 
 
 def now_ms() -> float:

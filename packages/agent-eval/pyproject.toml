@@ -69,4 +69,10 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501", "B008"]
+ignore = [
+    "E501",
+    "B008",
+    # (str, Enum) mixins are intentional: StrEnum would change str(member) /
+    # f-string serialization to the bare value and break API/storage payloads.
+    "UP042",
+]

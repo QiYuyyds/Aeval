@@ -15,7 +15,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-
 # ─── Task Definition Layer ───────────────────────────────────────────────────
 
 
@@ -114,7 +113,7 @@ class EvalSuite(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _validate_task_ids_unique(self) -> "EvalSuite":
+    def _validate_task_ids_unique(self) -> EvalSuite:
         ids = [t.id for t in self.tasks]
         if len(ids) != len(set(ids)):
             duplicates = sorted({x for x in ids if ids.count(x) > 1})
@@ -122,7 +121,7 @@ class EvalSuite(BaseModel):
         return self
 
     @classmethod
-    def from_yaml(cls, path: str) -> "EvalSuite":
+    def from_yaml(cls, path: str) -> EvalSuite:
         """从 YAML 文件加载评测套件 (含严格校验, 错误带文件路径上下文)"""
         from agent_eval.core.suite import load_suite
 

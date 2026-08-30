@@ -7,10 +7,10 @@ as well as helper functions for metric aggregation.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from agent_eval.core.types import TrialResult
-
 
 # ─── pass@k / pass^k ──────────────────────────────────────────────────────────
 
@@ -171,10 +171,8 @@ def extract_metrics(
         # Token 用量
         tokens = attrs.get("agenthub.total_tokens") or attrs.get("llm.usage.total_tokens")
         if tokens:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 n_total_tokens += int(tokens)
-            except (ValueError, TypeError):
-                pass
 
     if "n_turns" in tracked_metrics:
         metrics["n_turns"] = float(n_turns)

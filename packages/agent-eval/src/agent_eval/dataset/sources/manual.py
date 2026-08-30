@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
+
 from agent_eval.dataset.models import (
     DatasetError,
     EvalDataset,
     SourceType,
     now_ms,
 )
-from pydantic import ValidationError
 
 
 class DatasetImportError(DatasetError):

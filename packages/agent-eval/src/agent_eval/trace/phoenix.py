@@ -44,11 +44,11 @@ class PhoenixProvider:
                 from phoenix.client import Client as PhoenixClient
 
                 self._client = PhoenixClient(base_url=self.endpoint)
-            except ImportError:
+            except ImportError as e:
                 raise RuntimeError(
                     "phoenix package not installed. "
                     "Install with: pip install arize-phoenix"
-                )
+                ) from e
         return self._client
 
     async def get_spans(self, trace_id: str) -> list[dict[str, Any]]:

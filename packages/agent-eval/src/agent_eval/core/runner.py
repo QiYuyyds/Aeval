@@ -15,13 +15,15 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from agent_eval.core.contract import (
     AgentRunner,
@@ -49,7 +51,6 @@ from agent_eval.metrics.base import Metric
 from agent_eval.metrics.llm_judge import LLMFn
 from agent_eval.storage import MemoryStorage
 from agent_eval.trace import PhoenixProvider
-
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +379,7 @@ class EvalRunner:
 
             return trial
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = time.time() * 1000 - start_time
             return TrialResult(
                 trial_index=index,
@@ -506,7 +507,7 @@ class EvalRunner:
                     grader.grade(trial, spans, task, call_context),
                     timeout=self.grader_timeout,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 result = GraderResult(
                     grader_name=config.name,
                     grader_type=config.type,
@@ -681,7 +682,9 @@ class EvalRunner:
                 return True
             weighted_score = sum(
                 r.score * gc.weight
-                for r, gc in zip(grader_results, task.graders)
+                # strict=False: replay 路径 (runs.py) 的 grader_results 可能来自
+                # 旧版本 suite, 长度不保证一致 — 保持截断语义
+                for r, gc in zip(grader_results, task.graders, strict=False)
             ) / total_weight
             return weighted_score >= threshold
 
@@ -689,7 +692,7 @@ class EvalRunner:
             # required 必须通过
             required_pass = all(
                 r.passed
-                for r, gc in zip(grader_results, task.graders)
+                for r, gc in zip(grader_results, task.graders, strict=False)
                 if gc.required
             )
             if not required_pass:
@@ -697,7 +700,7 @@ class EvalRunner:
 
             # 非 required 加权
             non_required = [
-                (r, gc) for r, gc in zip(grader_results, task.graders)
+                (r, gc) for r, gc in zip(grader_results, task.graders, strict=False)
                 if not gc.required
             ]
             if not non_required:
@@ -860,8 +863,6 @@ class EvalRunner:
     ) -> None:
         """发送进度事件"""
         if callback is not None:
-            try:
+            # 回调不应中断主流程
+            with contextlib.suppress(Exception):
                 await callback(event, data)
-            except Exception:
-                # 回调不应中断主流程
-                pass

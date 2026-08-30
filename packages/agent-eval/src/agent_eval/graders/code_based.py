@@ -25,8 +25,8 @@ import json
 import re
 from typing import Any
 
-from agent_eval.core.contract import EvalContext, Grader
-from agent_eval.core.types import GraderResult, GraderType, EvalTask, TrialResult
+from agent_eval.core.contract import EvalContext
+from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
 
 
 class CodeBasedGrader:

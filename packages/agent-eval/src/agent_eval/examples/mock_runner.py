@@ -27,11 +27,10 @@ from __future__ import annotations
 
 import asyncio
 import random
-import time
 import uuid
 from typing import Any
 
-from agent_eval.core.contract import AgentRunner, TransientError
+from agent_eval.core.contract import TransientError
 from agent_eval.core.types import EvalTask
 
 

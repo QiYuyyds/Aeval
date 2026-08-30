@@ -17,9 +17,10 @@ Usage:
 
 from __future__ import annotations
 
+from fastapi import FastAPI
+
 from agent_eval.api.routes import datasets, graders, metrics, runs, suites, tasks
 from agent_eval.core.runner import EvalRunner
-from fastapi import FastAPI
 
 # Global runner reference (set by create_app)
 _runner: EvalRunner | None = None

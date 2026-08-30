@@ -44,6 +44,6 @@ async def batch_evaluate(request: BatchEvaluationRequest):
         raise HTTPException(
             status_code=422,
             detail={"message": str(e), "unknown_metrics": e.unknown},
-        )
+        ) from e
     except LLMNotConfiguredError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e)) from e

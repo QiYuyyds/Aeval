@@ -1,6 +1,7 @@
 """Unit tests for agent_eval suite YAML loading and validation (task 2.2)."""
 
 import pytest
+
 from agent_eval.core.suite import SuiteLoadError, load_suite
 from agent_eval.core.types import EvalSuite
 

@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -44,7 +45,6 @@ from agent_eval.metrics import (
     build_default_metrics_registry,
 )
 from agent_eval.metrics.base import Metric, MetricResult
-
 
 # ─── 同步包装 ────────────────────────────────────────────────────────────────
 

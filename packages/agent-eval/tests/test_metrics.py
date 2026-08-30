@@ -1,6 +1,7 @@
 """Unit tests for agent_eval core metrics (pass@k / pass^k / aggregation)."""
 
 import pytest
+
 from agent_eval.core.metrics import (
     aggregate_metrics,
     extract_metrics,

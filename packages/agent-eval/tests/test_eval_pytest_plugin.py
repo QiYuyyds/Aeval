@@ -14,9 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import agent_eval
 import pytest
 
+import agent_eval
 from agent_eval.metrics.base import MetricResult
 from agent_eval.metrics.llm_judge import LLMNotConfiguredError
 

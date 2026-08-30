@@ -19,8 +19,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from agent_eval.core.contract import EvalContext, Grader
-from agent_eval.core.types import GraderResult, GraderType, EvalTask, TrialResult
+from agent_eval.core.contract import EvalContext
+from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
 
 
 class ArtifactCheckGrader:
@@ -77,7 +77,7 @@ class ArtifactCheckGrader:
                     grader_name=self.name,
                     grader_type=GraderType.ARTIFACT,
                     score=0.3,
-                    passed=0.3 >= threshold,
+                    passed=threshold <= 0.3,
                     explanation=f"Content does not match pattern: {content_regex}",
                     details={"artifacts": artifacts},
                 )
