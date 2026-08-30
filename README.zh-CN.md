@@ -4,7 +4,7 @@
 
 **Aeval** 是一个由 OpenTelemetry trace 驱动的开源 AI Agent 评测框架。用 YAML 声明评测套件，让 Agent 反复执行（重试 / 并发 / 超时隔离），逐 trial 评分（内置或自定义 Grader），最终聚合为统计上有意义的指标 —— `pass@k` / `pass^k` / 一致性 / 饱和度。
 
-> **命名说明**：本仓库叫 **Aeval**；PyPI 包名为 **`agent-eval`**（Python 模块 `agent_eval`，CLI 命令 `eval-suite`）。PyPI 名以检索性优先——两者指同一项目。
+> **命名说明**：本仓库叫 **Aeval**；PyPI 发行名为 **`aeval-framework`**（`pip install aeval-framework`），Python 模块为 **`agent_eval`**，CLI 为 **`eval-suite`**——与 `pip install pillow` → `import PIL` 同理。（PyPI 上的 `agent-eval` 属于另一无关项目。）
 
 ## 特性
 
@@ -19,9 +19,9 @@
 ## 安装
 
 ```bash
-pip install agent-eval            # 核心（编排 / 评分 / 存储）
-pip install "agent-eval[api]"     # + REST API 服务
-pip install "agent-eval[cli]"     # + eval-suite 命令行
+pip install aeval-framework            # 核心（编排 / 评分 / 存储）
+pip install "aeval-framework[api]"     # + REST API 服务
+pip install "aeval-framework[cli]"     # + eval-suite 命令行
 ```
 
 导出 trace 到 [Arize Phoenix](https://github.com/Arize-ai/phoenix) 是可选能力：自行安装 `arize-phoenix`，Aeval 会在使用时懒加载。
@@ -31,7 +31,7 @@ pip install "agent-eval[cli]"     # + eval-suite 命令行
 `examples/minimal` 使用内置 Mock Agent，完全离线可跑：
 
 ```bash
-pip install "agent-eval[cli]"
+pip install "aeval-framework[cli]"
 eval-suite run examples/minimal/suite.yaml
 eval-suite list runs
 eval-suite show <run_id>

@@ -4,7 +4,7 @@
 
 **Aeval** is an open-source evaluation framework for AI agents, driven by OpenTelemetry traces. Define evaluation suites in YAML, run your agent against them (repeatedly, with retries and concurrency control), grade each trial with built-in or custom graders, and aggregate results into statistically meaningful metrics — `pass@k` / `pass^k` / consistency / saturation.
 
-> **Naming**: this repository is **Aeval**; the PyPI package is **`agent-eval`** (Python module `agent_eval`, CLI `eval-suite`). The PyPI name is kept for discoverability — both refer to the same project.
+> **Naming**: this repository is **Aeval**; on PyPI the distribution is **`aeval-framework`** (`pip install aeval-framework`), the Python module is **`agent_eval`**, and the CLI is **`eval-suite`** — same convention as `pip install pillow` → `import PIL`. (`agent-eval` on PyPI belongs to an unrelated project.)
 
 ## Features
 
@@ -19,9 +19,9 @@
 ## Installation
 
 ```bash
-pip install agent-eval            # core (orchestration, graders, storage)
-pip install "agent-eval[api]"     # + REST API service
-pip install "agent-eval[cli]"     # + eval-suite CLI
+pip install aeval-framework            # core (orchestration, graders, storage)
+pip install "aeval-framework[api]"     # + REST API service
+pip install "aeval-framework[cli]"     # + eval-suite CLI
 ```
 
 Trace export to [Arize Phoenix](https://github.com/Arize-ai/phoenix) is optional: install `arize-phoenix` yourself and Aeval will pick it up lazily.
@@ -31,7 +31,7 @@ Trace export to [Arize Phoenix](https://github.com/Arize-ai/phoenix) is optional
 `examples/minimal` runs fully offline with the bundled mock agent:
 
 ```bash
-pip install "agent-eval[cli]"
+pip install "aeval-framework[cli]"
 eval-suite run examples/minimal/suite.yaml
 eval-suite list runs
 eval-suite show <run_id>
