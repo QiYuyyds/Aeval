@@ -29,7 +29,7 @@ DEFAULT_DB = "./aeval.db"
 RUNNERS_ENTRY_POINT_GROUP = "agent_eval.runners"
 
 app = typer.Typer(
-    help="Aeval — agent evaluation framework (https://github.com/agent-eval/agent-eval)",
+    help="Aeval — agent evaluation framework (https://github.com/QiYuyyds/Aeval)",
     no_args_is_help=True,
     add_completion=False,
 )
