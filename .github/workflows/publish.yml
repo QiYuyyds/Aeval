@@ -1,0 +1,37 @@
+# Aeval PyPI publish — tag-triggered.
+#
+# Pushing a v* tag builds packages/agent-eval and publishes it to PyPI.
+# Auth: PyPI trusted publishing (OIDC) via the `pypi` environment; a
+# project-scoped PYPI_TOKEN secret can serve as fallback. Tag pushes are
+# maintainer-gated — publishing is public and irreversible.
+
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # trusted publishing (PyPI OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build
+          cd packages/agent-eval
+          python -m build
+      - name: Publish to PyPI
+        if: ${{ secrets.PYPI_TOKEN != '' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/agent-eval/dist/
+          # Trusted publishing preferred; PYPI_TOKEN as fallback:
+          password: ${{ secrets.PYPI_TOKEN }}

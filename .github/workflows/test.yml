@@ -1,0 +1,51 @@
+# Aeval CI — test + lint + dashboard build.
+#
+# Runs on every push to main and on every PR:
+#   - python-tests: pytest + ruff for packages/agent-eval (Python 3.11 / 3.12)
+#   - dashboard-build: pnpm production build for apps/dashboard
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "packages/agent-eval[api,cli,dev]"
+      - name: Lint (ruff)
+        run: ruff check packages/agent-eval
+      - name: Run tests
+        run: |
+          cd packages/agent-eval
+          pytest tests/ -q --cov=agent_eval --cov-report=term-missing
+
+  dashboard-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build dashboard
+        run: pnpm --filter eval-dashboard build

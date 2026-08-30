@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+*.db
+*.sqlite3
+
+# Node / Next.js (dashboard)
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Env & OS
+.env
+.env.*
+.DS_Store
+Thumbs.db
