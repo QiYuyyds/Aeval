@@ -29,9 +29,9 @@ jobs:
           cd packages/agent-eval
           python -m build
       - name: Publish to PyPI
-        if: ${{ secrets.PYPI_TOKEN != '' }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: packages/agent-eval/dist/
-          # Trusted publishing preferred; PYPI_TOKEN as fallback:
+          # Trusted publishing (OIDC) is used when PYPI_TOKEN is unset;
+          # otherwise the project-scoped token takes precedence:
           password: ${{ secrets.PYPI_TOKEN }}
