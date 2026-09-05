@@ -52,7 +52,7 @@
 - [x] 7.1 `AChatAgentRunner.run` 改为返回证据 + 接受会话句柄；`subject_state` 与 `harness_state` 分开填：`fs_listdir` 走评测侧读数通道，agent 自述走 `subject`
 - [x] 7.2 环境实现探针（文件清单 + DB dump 两条即可），并确认运行中探针与 `WorkspaceCoordinator` 无冲突（已核无锁，仍需实测）—— 实测方式：`test_probe_follows_the_current_trial_not_the_caller` 把「probe 读 current trial、交叠时后 begin 覆盖前者」写成断言，并据此保留 `concurrency=1`
 - [x] 7.3 宿主两个自有评分器补来源声明
-- [ ] 7.4 重跑 `run_first_suite.py`：确认 9 trial 仍全部 valid；**预期差异要逐条解释**——尤其 `file-creation` 若因证据级别重划而改变结论，要说明它原来依赖的是哪一级 —— **待跑**：后端 :8000 与 Phoenix :6006 均未运行，且需一个可用 `EVAL_AGENT_ID`；逐条差异预解释已写在 `host-migration/README.md`（并据核实的代码事实纠正了 design 对 `file-creation` 的判断）
+- [x] 7.4 重跑 `run_first_suite.py`：确认 9 trial 仍全部 valid；**预期差异要逐条解释**——尤其 `file-creation` 若因证据级别重划而改变结论，要说明它原来依赖的是哪一级 —— 实跑通过：`run_8ca076ca783a`（agent `ag_yTc8OAQE5Uzi`）9 trial 全 valid、pass@1=100%，`file-creation` 的 `weakest_evidence=harness`、`moment=at_end`，另两条 task 是 `runner`；逐条差异与口径变化记在 `host-migration/README.md`。**首跑（`run_06a16595008a`）三条全挂，查证据链后确认是两个框架缺陷**：结束态只取序列里最后一条读数（db_dump 顶掉了 workspace 清单，明明存在的 hello.md 被判不存在）、`list_grade_attempts` 从 blob 读 `is_current`（18 条全报当前）—— 均已修并有回归用例（`fix(orchestration)!` / `fix(storage)`）
 - [x] 7.5 更新宿主 `docs/eval-harness-design*.md`：那份文件里仍写着 ① 修掉的旧 `pass@k` 实现，顺带纠正
 
 ## 8. 历史数据与口径声明
