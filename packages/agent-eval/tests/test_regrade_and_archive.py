@@ -192,12 +192,20 @@ async def test_each_verdict_records_its_caliber():
     assert first.trial.evidence is None
 
 
-async def test_regrade_appends_and_moves_the_current_pointer():
-    runner, run = await collected_run()
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_regrade_appends_and_moves_the_current_pointer(backend, tmp_path):
+    storage = (
+        SqliteStorage(db_path=str(tmp_path / "pointer.db"))
+        if backend == "sqlite"
+        else MemoryStorage()
+    )
+    if backend == "sqlite":
+        await storage.initialize()
+    runner, run = await collected_run(storage)
     original = (await runner.storage.list_grade_attempts(run.run_id))[0]
     assert original.triggered_by == "run"
 
-    # 判据换口径: 现在只认评测侧取证 (原结论不得消失)
+    # 判分换口径: 现在只认评测侧取证 (原结论不得消失)
     narrowed = EvalSuite(
         name="archive-suite",
         version="1.0.0",
@@ -208,9 +216,12 @@ async def test_regrade_appends_and_moves_the_current_pointer():
     attempts = await runner.storage.list_grade_attempts(run.run_id)
     assert [a.triggered_by for a in attempts] == ["run", "run", "regrade", "regrade"]
     assert [a.is_current for a in attempts] == [False, False, True, True]
+    # 一个 trial 只能有一条当前生效结论 —— 两个后端都得如实回答
+    currents = [a for a in attempts if a.is_current]
+    assert len(currents) == 2
+    assert {(a.task_id, a.trial_index) for a in currents} == {("t1", 0), ("t1", 1)}
     # 原结论完整保留, 与新结论并列
-    kept = attempts[0]
-    assert kept.trial.success is True
+    assert attempts[0].trial.success is True
     assert regaded.trials["t1"][0].success is True
     assert attempts[2].trial.success is True
 

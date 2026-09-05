@@ -342,7 +342,11 @@ class SqliteStorage:
     async def list_grade_attempts(
         self, run_id: str, task_id: str | None = None, trial_index: int | None = None
     ) -> list[GradeAttempt]:
-        """按时间升序返回判定条目 (原结论与重评结论并列可查)。"""
+        """按时间升序返回判定条目 (原结论与重评结论并列可查)。
+
+        ``is_current`` 以**列**为准: 指针移动只 UPDATE 了列, blob 里写的还是当时
+        的 True —— 直接信 blob 会让「哪条是当前结论」答错。
+        """
         self._ensure_initialized()
         clauses = ["run_id = ?"]
         params: list[Any] = [run_id]
@@ -355,9 +359,13 @@ class SqliteStorage:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                f"SELECT data FROM grade_attempts WHERE {' AND '.join(clauses)} "
+                f"SELECT data, is_current FROM grade_attempts "
+                f"WHERE {' AND '.join(clauses)} "
                 "ORDER BY created_at ASC, attempt_id ASC",
                 tuple(params),
             )
             rows = await cursor.fetchall()
-            return [GradeAttempt.model_validate(json.loads(r["data"])) for r in rows]
+        return [
+            GradeAttempt.model_validate({**json.loads(r["data"]), "is_current": bool(r["is_current"])})
+            for r in rows
+        ]
