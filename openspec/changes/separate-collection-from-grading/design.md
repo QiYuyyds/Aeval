@@ -149,7 +149,7 @@ run 已经按 `model_dump()` 整包存；本变更加 `trial_evidence`（按 tri
 - **「harness 级」仍是自我声明**：接入方若把自报数据标成 harness，框架从数据上无法分辨 → 接受并**明写**。本变更的收益是让撒谎需要显式撒谎（套件里写 `allow_subject`、实现里伪造探针），并且这个选择在 run 里可见；真正的强制需要后续环境隔离。README 与文档必须按这个措辞，不得写成"已防作弊"。
 - **重评产生多个结论，"哪个是真的"会变成新问题** → 缓解：`grade_attempts` 带 current 指针 + 每次判定记录版本；默认展示 current，但历史结论永不被隐藏。
 - **证据归档让 SQLite 体积快速膨胀**（打开正文后单 trial 可达数十 KB 到数百 KB）→ 缓解：默认不采、探针可单独声明留存、`storage` 侧要求按 run 彻底删除；具体留存默认值列为待答。
-- **默认 `subject` 不可单独判通过会立刻打断现有宿主套件**：AChat 的 `first-suite.yaml` 里 `file-creation` 现在正是靠 outcome 字符串匹配判通过的 → 这不是回归，是**修好了一个一直在发的假绿**（那个检查事实上只证明 agent 提过文件名）。必须在升级说明里明写，否则宿主 CI 会像突然退化。
+- **默认 `subject` 不可单独判通过会立刻打断现有宿主套件**：核对宿主代码后修正了原先的判断 —— `first-suite.yaml` 的 `file-creation` 并不是「只证明 agent 提过文件名」：它用 `code_based target: outcome` 匹配的文本来自 `AChatAgentRunner._collect_outcome_files`，即经 `fs_listdir` + `fs_read` 读到的**真实 workspace 内容与路径**，属可信但非独立的 `runner` 级证据。③ 对它的真实影响是：这份读数改由取证通道交付并升为 `harness` 级，于是 `target: outcome` 不再看得到它，套件必须把该判据换成 `state_check`（`evidence: [harness]`）。口径也确实变了，所以要在升级说明里明写，否则宿主 CI 会像突然退化。
 - **改动面大**：协议、类型、编排、9 个内置评分器、2 个宿主评分器、2 个存储实现、mock，加测试 → 缓解：按 Migration 顺序分步落地，每步都有独立可回滚的验证点；mock 先改成新契约，用它驱动内置评分器。
 - **`run()` 收到任务视图后，依赖 `task.env` 之外字段的宿主实现会失效** → 已核对：`AChatAgentRunner` 只用 `task.prompt` 与 `task.env`，正是任务视图允许的两项。
 
@@ -169,5 +169,5 @@ run 已经按 `model_dump()` 整包存；本变更加 `trial_evidence`（按 tri
 
 ## Open Questions
 
-- 证据归档的默认留存策略（按 run 保留 N 天 / 只保留被判 `invalid` 的 trial 的证据 / 全量保留直到显式删除）——不影响契约形状，等实测体积再定。
+- ~~证据归档的默认留存策略~~ —— **已由实测回答 (任务 10.7)**：SQLite 里单条 trial 的 `trial_evidence` 行在默认口径 (两类正文都不采) 约 **2.1 KB**；开启正文与入参并走默认摘要脱敏后**仍然约 2.1 KB**（正文被换成定长摘要）；只有换成保留明文的钩子（`IdentityEvidenceRedactor` 一类）才涨 —— 2,352 字符正文实测 **9.1 KB**，73,899 字符 **223.7 KB**。run 记录本身不含证据正文（另表存一份，不双写）。因此本期结论：**全量保留直到显式按 run 删除**，不引入按天过期或「只留 invalid」那类裁剪 —— 体积风险由采集开关与脱敏钩子的选择决定，而不是由留存策略决定。若将来要支持明文留存，再单立变更。
 - `steps` 是否需要与公共轨迹交换格式（ATIF 一类）对齐以便复用现成产出。本变更先按内部结构落，接入公共格式待评估其对手段与结果的影响后另立变更。
