@@ -820,13 +820,11 @@ class TrialEvidence(BaseModel):
     def observed_window(self) -> bool:
         """是否采到了构成「窗口」的多次取证 —— 「任一时刻」类判据的前提。
 
-        按**次数**而非按时间戳计数: 两次独立取证落在同一毫秒 (本机时钟粒度就这么粗)
-        仍然分别中途与结束两个时刻, 只看时间戳会把真实存在的窗口判成不存在。
+        计数单位是**取证时刻**而不是读数条数: 一次取证常跨多个通道 (文件清单 +
+        DB dump) 且共享同一时刻, 那只是一个时刻的多份读数, 不构成时间窗口。
         """
-        usable = [obs for obs in self.harness_state if not obs.is_absent]
-        if len(usable) >= 2:
-            return True
-        return len({obs.observed_at for obs in usable}) >= 2
+        moments = {obs.observed_at for obs in self.harness_state if not obs.is_absent}
+        return len(moments) >= 2
 
     def state_window(
         self,
@@ -842,7 +840,6 @@ class TrialEvidence(BaseModel):
             readings=series,
             invert=moment is JudgmentMoment.NOT_AT_END,
         )
-
         if not usable:
             first_absent = series[0] if series else None
             window.reason = (
@@ -871,13 +868,18 @@ class TrialEvidence(BaseModel):
                     _merge_state(window.payload, obs.value)
             return window
 
-        last = usable[-1]
-        window.readings = [last]
-        if isinstance(last.value, dict):
-            window.payload = copy.deepcopy(last.value)
-        elif not isinstance(last.value, (list, tuple)):
+        # 结束态 = **最后一个取证时刻**上的全部读数合并。一次取证往往跨多个通道
+        # (文件清单 + DB dump) 且共享同一时刻; 只取序列里最后一条会让一个通道把
+        # 另一个通道的终态顶掉 (真实链路验收踩过: db_dump 抹掉了文件清单)。
+        last_moment = max(obs.observed_at for obs in usable)
+        at_end = [obs for obs in usable if obs.observed_at == last_moment]
+        window.readings = at_end
+        for obs in at_end:
+            if isinstance(obs.value, dict):
+                _merge_state(window.payload, obs.value)
+        if not window.payload:
             window.reason = AbsentReason.UNRECOGNIZED_ATTRIBUTE.value
-            window.detail = f"状态读数不是可判定的字典结构: {type(last.value).__name__}"
+            window.detail = "结束态读数不是可判定的字典结构"
         return window
 
 

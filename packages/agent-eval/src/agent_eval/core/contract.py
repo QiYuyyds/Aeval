@@ -139,6 +139,20 @@ class TrialSession:
         self._cancelled = cancelled or (lambda: False)
         self.emitted: list[Observation] = []
         self.probe_readings: list[Observation] = []
+        self._last_moment = 0.0
+
+    def _next_moment(self) -> float:
+        """一次取证 = 一个时刻。
+
+        同一次调用跨多个通道 (文件清单 + DB dump), 它们必须共享同一时刻, 否则「结束态」
+        就无法界定; 又因为本机时钟粒度可能粗到毫秒, 这里强制递增, 保证两次探针调用不会
+        被压成同一个时刻 —— 「任一时刻」类判据正依赖这个区分。
+        """
+        moment = time.time() * 1000
+        if moment <= self._last_moment:
+            moment = self._last_moment + 0.001
+        self._last_moment = moment
+        return moment
 
     # ── 接入方推送 ──
 
@@ -173,28 +187,32 @@ class TrialSession:
         接入方不支持探针时返回一条明确的「没取到」读数, 而不是空列表 —— 空读数
         会被下游读成「环境里确实没有」, 那是一个结论而不是一句抱歉。
         """
+        moment = self._next_moment()
         if self._probe is None:
-            reading = Observation.absent(
-                EvidenceKind.STATE,
-                AbsentReason.PROVIDER_UNAVAILABLE.value,
-                channel=channel,
-                detail="该环境未接入取证探针",
-            )
-            self.probe_readings.append(reading)
-            return [reading]
-        readings = list(await self._probe(channel))
-        if not readings:
-            # 探针实现方忘了报缺失时由这里兜住: 空集 ≠ 没取到
             readings = [
                 Observation.absent(
                     EvidenceKind.STATE,
                     AbsentReason.PROVIDER_UNAVAILABLE.value,
-                    channel=channel,
-                    detail="探针未产出任何读数",
+                    channel=channel or "probe",
+                    detail="该环境未接入取证探针",
                 )
             ]
-        self.probe_readings.extend(readings)
-        return readings
+        else:
+            readings = list(await self._probe(channel))
+            if not readings:
+                # 探针实现方忘了报缺失时由这里兜住: 空集 ≠ 没取到
+                readings = [
+                    Observation.absent(
+                        EvidenceKind.STATE,
+                        AbsentReason.PROVIDER_UNAVAILABLE.value,
+                        channel=channel or "probe",
+                        detail="探针未产出任何读数",
+                    )
+                ]
+        # 一次取证 = 一个时刻: 该次调用跨的所有通道共用它, 结束态才界定得清楚
+        stamped = [obs.model_copy(update={"observed_at": moment}) for obs in readings]
+        self.probe_readings.extend(stamped)
+        return stamped
 
     # ── 时限与取消 ──
 

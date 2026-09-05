@@ -194,6 +194,55 @@ def test_not_at_end_reads_the_same_end_state_inverted():
     assert window.payload["files"] == {}
 
 
+def test_end_state_merges_every_probe_channel():
+    """一次结束前取证跨多通道: 结束态必须是各通道最后读数的合并。
+
+    真实链路验收踩过这个坑: db_dump 排在 workspace_files 之后, 只取序列最后一条
+    就让「库里没有 files 键」把文件清单整个顶掉, 于是明明存在的 hello.md 判不成立。
+    """
+    evidence = TrialEvidence(
+        harness_state=[
+            Observation(
+                kind=EvidenceKind.STATE, observed_by=ObservedBy.HARNESS, observed_at=1_000.0,
+                channel="workspace_files", value={"files": {"hello.md": "Hello from Aeval!"}},
+            ),
+            Observation(
+                kind=EvidenceKind.STATE, observed_by=ObservedBy.HARNESS, observed_at=1_000.0,
+                channel="db_dump", value={"db_records": [{"id": 1}], "artifact_count": 2},
+            ),
+        ]
+    )
+    window = evidence.state_window(ObservedBy.HARNESS, JudgmentMoment.AT_END)
+    assert window.usable
+    assert window.payload["files"] == {"hello.md": "Hello from Aeval!"}
+    assert window.payload["db_records"] == [{"id": 1}]
+    assert len(window.readings) == 2
+
+
+def test_end_state_keeps_the_last_reading_of_each_channel():
+    """同一通道被取多次时, 结束态用它自己最后一次读数 (中途那次不算终态)。"""
+    evidence = TrialEvidence(
+        harness_state=[
+            Observation(
+                kind=EvidenceKind.STATE, observed_by=ObservedBy.HARNESS, observed_at=1_000.0,
+                channel="workspace_files", value={"files": {"tmp.py": ""}},
+            ),
+            Observation(
+                kind=EvidenceKind.STATE, observed_by=ObservedBy.HARNESS, observed_at=2_000.0,
+                channel="workspace_files", value={"files": {}},
+            ),
+            Observation(
+                kind=EvidenceKind.STATE, observed_by=ObservedBy.HARNESS, observed_at=2_000.0,
+                channel="db_dump", value={"rows": 3},
+            ),
+        ]
+    )
+    at_end = evidence.state_window(ObservedBy.HARNESS, JudgmentMoment.AT_END)
+    any_time = evidence.state_window(ObservedBy.HARNESS, JudgmentMoment.ANY_TIME)
+    assert at_end.payload == {"files": {}, "rows": 3}
+    assert any_time.payload["files"] == {"tmp.py": ""}  # 窗口是存在量词
+
+
 def test_subject_channel_cannot_answer_any_time():
     evidence = TrialEvidence(
         subject_state=[_at(ObservedBy.SUBJECT, at=1.0), _at(ObservedBy.SUBJECT, at=2.0)]
