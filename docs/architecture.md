@@ -14,17 +14,17 @@ Aeval 是一个由 OTel trace 驱动的 Agent 评测框架：取证按 OTel GenA
 ```
 agent_eval/
 ├── core/           # 编排与统计
-│   ├── types.py      # 数据模型: EvalSuite/EvalTask/GraderConfig → TrialResult/TaskSummary/RunSummary/RunResult
-│   ├── contract.py   # 协议: AgentRunner(必选)/TraceProvider/Grader/Storage/EnvironmentManager + 报错分类异常/EvalContext
+│   ├── types.py      # 数据模型: EvalSuite/EvalTask/GraderConfig/TaskView → 证据层(ObservedBy/Observation/TrialEvidence/GradeAttempt) → TrialResult/TaskSummary/RunSummary/RunResult
+│   ├── contract.py   # 协议: AgentRunner(必选, run(view, session)→证据)/TraceProvider/Grader/Storage/EnvironmentManager(含取证探针) + TrialSession + 报错分类异常/EvalContext
 │   ├── suite.py      # YAML 加载 + 严格校验 (校验器在 Pydantic 模型上)
 │   ├── metrics.py    # 估计量 (组合无偏 / 外推标注) + 有效性分母 + Wilson & bootstrap 区间 + p50/p95/worst_of_n + 过程指标与成本轴派生
 │   ├── pricing.py    # 单价表 (外部配置, 无内置价目) 与四路 token 折算
 │   ├── redaction.py  # 证据脱敏钩子 Protocol + 默认摘要实现
 │   └── runner.py     # EvalRunner — 核心编排器
-├── graders/        # 9 个内置评分器 + 注册表 (只读标准观测)
+├── graders/        # 9 个内置评分器 + 注册表 (只读标准观测; 按声明的证据级别取信)
 ├── metrics/        # LLM 质量指标 (RAG 四件套/LLM judge/批量/报告/pytest 插件)
 ├── dataset/        # 数据集构建 (5 类数据源/质量检查/覆盖度/semver 升版)
-├── storage/        # Memory + SQLite (runs/suites/人工评分请求)
+├── storage/        # Memory + SQLite (runs/suites/人工评分请求 + trial_evidence/grade_attempts 两张派生表)
 ├── trace/          # 归一化边界
 │   ├── mapping.py    #   属性翻译表 (内置条目对齐 OTel GenAI + 版本常量) + default_mapping()
 │   ├── normalize.py  #   span → 标准观测 (唯一读原始属性名的地方) + collect_observations()
@@ -47,38 +47,51 @@ suite.yaml ──load──▶ EvalSuite
                ┌─── EvalRunner.run_suite ───┐
                │  (per task, N trials)       │
                │                             │
-   snapshot ──▶│ setup → agent.run(prompt)   │── TransientError? ──▶ 指数退避重试 (用尽记 invalid)
-               │   │                         │── 超时?            ──▶ invalid(trial_timeout), 不占分母
-               │   ├─ trace_provider.spans   │── 报错未分类        ──▶ invalid(需人工判定)
-               │   ├─ normalize_spans ───────┼─▶ 标准观测 + 缺失清单 + 未识别属性名
-               │   ├─ 指标提取 / 预算判定      │── 步数/token/成本触顶 ─▶ 立即停止, 不评分
-               │   ├─ graders (拓扑序, 只读观测)
-               │   ├─ teardown               │
-               │   └─ verify_clean (泄漏检测) │── 泄漏 → restore + 告警(不判失败)
+   snapshot ──▶│ ① 采集相                    │── TransientError? ──▶ 指数退避重试 (用尽记 invalid)
+               │   setup → run(TaskView,     │── 超时?            ──▶ invalid(trial_timeout), 不占分母
+               │          TrialSession)      │── 报错未分类        ──▶ invalid(需人工判定)
+               │    ├ session.emit(...)      │   ← 适配层随做随推
+               │    ├ session.harness_probe()│   ← 运行中独立取证 (带时刻)
+               │    └ trace spans → 归一化   ──▶ 标准观测 + 缺失清单 + 未识别属性名
+               │ ② 结束前取证 end_state       │   ← 框架发起: 至少一个结束态读数
+               │    证据按 trial 落盘 ────────┼──▶ trial_evidence 表
+               │    teardown                 │
+               │    verify_clean(harness 读数)│── 泄漏 → restore + 告警(不判失败)
+               │ ③ 评分相 (先停被评方再判分)   │
+               │    graders 拓扑序, 只读声明过的级别
+               │    两条默认规则: 越级 / 仅自报 → invalid
+               │    判定口径落盘 ─────────────┼──▶ grade_attempts 表 (current 指针, 永不覆盖)
                └─────────────────────────────┘
                         │
                         ▼
-   RunSummary (pass@k / pass^k / 一致性 / 饱和度 / 终止原因分布 / 资源与成本轴)
+   RunSummary (pass@k / pass^k / 一致性 / 饱和度 / 终止原因分布 / 资源与成本轴 / 证据强度分布)
                         │
                         ▼
-   RunResult.evidence (采集开关 · 规范与映射版本 · 脱敏处理标识)
+   RunResult.evidence (采集开关 · 规范与映射版本 · 脱敏处理标识 · allow_subject 放行清单)
                         │
                         ▼
               Storage (Memory / SQLite)  ──▶  API / CLI / Dashboard
+
+   ── 延迟评分 (与采集解耦) ──────────────────────────────────────
+   regrade_run(run_id)   ─▶ 读 trial_evidence ─▶ 用当前判据/翻译表/judge 重判
+                            （全程不调用 AgentRunner; 新结论追加进 grade_attempts）
+   verdict_drift(run_id) ─▶ 原结论 vs current 的翻判比例
 ```
 
 关键行为约定：
 
+- **三相顺序**：取证 MUST 在 teardown 之前（停止阶段常会清理工作目录，之后再采只能读到被清理后的状态）；评分 MUST 在停止之后（先停被评方再判分，避免边采边改）；证据先落盘、判分是它的可重放派生
 - **并发模型**：trial 并发默认 1（`asyncio.Semaphore` 可调）；评分器内部另有并发上限
 - **重试**：只有 `TransientError` 重试（实现方显式包装）；重试用尽记 `invalid` + `external_dependency_unavailable`——基建问题不是 agent 能力问题
 - **终止原因由框架判定**，不信被评测方自报：`agent_completed` / `step_budget_exceeded` / `token_budget_exceeded` / `cost_budget_exceeded` / `timeout` / `agent_error` / `cancelled`，归类分野见 §4.5
 - **预算触顶即停**：该 trial 不再进入评分（拿不完整的证据得出关于 agent 的结论比不结论更糟），但已采集的 transcript / 指标 / 产物保留
 - **报错分类**：`AgentDefect` 计未通过并占分母；`ExternalDependencyError` 记 invalid；未声明类别的其他异常记 `unclassified_agent_error` **需人工判定**，框架不替它折算通过与否
 - **取消是协作式的**：`POST /runs/{run_id}/cancel` 置标志位，**进行中的 trial 跑完**（强杀留下的半途状态比不取消更难解释），此后未启动的 trial 逐个记 `cancelled` 留痕，已完成部分保留可查
-- **泄漏检测**：`verify_clean` 报告不干净 → 自动 restore + 告警；trial 成败只由评分决定
+- **泄漏检测**：`verify_clean` 收到本次 trial 的评测侧取证读数并据其比对，不再依赖被评方自报状态；报告不干净 → 自动 restore + 告警；trial 成败只由评分决定
 - **评分依赖**：grader 按 `dependencies` 拓扑排序执行；依赖未通过 → 跳过并给 0 分解释，判定仍为 `valid`（这是关于 agent 的结论）
-- **评测侧故障**：grader 异常/超时、未注册 grader、judge 不可用、判分无法解析、判据未配置、取证通道不可用 → 记 `invalid` 并保留原因，不折成 0 分、不占分母、不 crash run
-- **grader 缓存**：同 run 内按 prompt-hash 缓存评分结果（可关），**按 run 分桶**——删除 run 时其派生结果（可能含采集到的证据内容）一并失效
+- **评测侧故障**：grader 异常/超时、未注册 grader、judge 不可用、判分无法解析、判据未配置、取证通道不可用、证据越级、仅自报支撑的通过 → 记 `invalid` 并保留原因，不折成 0 分、不占分母、不 crash run
+- **grader 缓存**：同 run 内按内容寻址缓存评分结果（可关），key 含**取信声明**（`evidence` / `allow_subject` / `judgment_moment`）与取证读数的内容 —— 同一份 transcript 在三种声明下结论不同，共用缓存会让第一个看到的声明决定后面所有结论。**按 run 分桶**——删除 run 时其派生结果（可能含采集到的证据内容）一并失效
+- **重评分**：`regrade_run` 只读归档证据重放判定，不触碰被评系统；证据不齐即**整体拒绝**（`IncompleteEvidence` 点名缺哪几条），本变更前落盘的 run 一律 `RegradeUnavailable`。本期只有库层入口，HTTP/CLI 未暴露
 
 ## 4. 统计语义
 
@@ -150,6 +163,24 @@ task 与 run 两级汇总都输出 `termination_reasons` 分布计数（不折�
 - **两类分开汇总**：`summary.resources` 给出 `passed` / `failed` 各自的平均 token 与成本及 `costed_trials`，「失败比成功更贵」这类事实不被全局均值抹平；`cost_unknown_trials` 与 `cost_unknown_reason` 单列算不出成本的 trial。
 - **跨 run 趋势**：`cost_trend()` 只把有成本轴的 run 连成序列，其余进 `excluded` 并标原因（`history_run_without_resource_axis` / `no_summary` / 具体的缺失原因），`comparable` 需 ≥2 个可计入 run。
 
+### 4.7 证据分级与延迟评分
+
+统计口径（§4.1–4.6）回答「数字怎么算」，这一节回答「数字凭什么可信」。一次 trial 交付的每条读数都带 `observed_by`：
+
+| 级别 | 谁观测到的 | 默认可信度 |
+|------|-----------|-----------|
+| `harness` | 评测侧在 teardown 之前独立取证（探针 / dump / 文件清单） | 最高；判据可被要求只认这一级 |
+| `runner` | 接入适配层交付（transcript、trace_id、自报终态、trace 埋点观测） | 默认可信 —— 那是接入方自己写的代码，不是 agent 的产出 |
+| `subject` | 被评 agent 自己写出的内容 | 不得单独支撑「通过」 |
+
+两条默认规则由框架统一执行，落到每条 grader 结论上（`invalid` 的两个新原因）：结论依据了未声明的级别 → `evidence_level_mismatch`；通过只由自报证据支撑且未写 `allow_subject` → `subject_only_evidence`。分级不立默认规则就只是元数据。
+
+- **判定时刻**：环境状态判据 MUST 声明依据 `at_end` / `not_at_end` / `any_time` 哪一个（默认结束时）。只有结束态一次取证时，`any_time` 报证据不足 —— 拿结束态冒充全时段观测等于把结果检查换成过程检查。
+- **分量可见**：`trial.weakest_evidence` 与汇总里的 `evidence_levels` 分布让「全靠自报的 1.0」与「评测侧取证的 1.0」在同一个报告里区分得出来；`subject_only_trials` 单列弱证据通过数。
+- **采集与评分分离**：证据先按 trial 落 `trial_evidence` 表（run 记录本身不内联证据正文），判分在其后独立进行。每次判定追加一格 `grade_attempts`，带判分实现版本、翻译表与规范修订、判定模型标识、时间与 `current` 指针，**永不覆盖**既有条目。
+- **重评分**：`regrade_run(run_id)` 复用归档证据重放判定，MUST NOT 调用被评系统；`verdict_drift(run_id)` 因此能回答「judge 换代让多少 trial 翻判」。统计口径版本（§4）与证据边界一起决定两个 run 能否比较。
+- **诚实边界**：`harness` 由框架在自己发起的探针调用上钉死，但接入方在**返回对象**里标什么级别框架无法从数据分辨。本变更让溯源**可声明**，不宣称**可强制** —— 强制需要环境隔离，属框架定位之外。
+
 ## 5. API 部署形态
 
 | 形态 | 入口 | 前缀 | 说明 |
@@ -161,20 +192,20 @@ task 与 run 两级汇总都输出 `termination_reasons` 分布计数（不折�
 
 **结构兼容不豁免口径声明**：同一大版本内数值的语义仍可能变化（如 v0.1.0 → v0.1.1 的统计口径修正），因此两种形态都经元信息接口公布当前口径：寄宿形态 `GET <prefix>/meta`，独立形态 `GET /v1/meta`，响应含 `statistics.version` 与 `confidence_level` / `bootstrap_rounds` / `min_valid_trials_for_saturation` / `gate_invalid_ratio_limit` 四个默认值。每个落盘 run 另在 `statistics_version` 上记录产出它时所用的版本，调用方据此判断两个 run 是否可比。
 
-同一份元信息还公布**证据口径**：`spec_version`（钉住的 OTel GenAI 版本）、`mapping_version`（翻译表自身版本）与 `tool_arguments_captured_by_default: false`。每个 run 另在 `evidence` 里落盘自己当时的证据边界（采集开关、逐 task 差异、规范与映射版本、脱敏处理标识与版本）。对比接口的可比判定要同时过两道：统计口径相同 **且** 证据边界相同，否则 `not_comparable_reason` 会点名是哪一维不同（缺边界记录的历史 run 一律视为不可直接比较，而不是假定与今天同边界）。
+同一份元信息还公布**证据口径**：`spec_version`（钉住的 OTel GenAI 版本）、`mapping_version`（翻译表自身版本）、`tool_arguments_captured_by_default: false`、`model_content_captured_by_default: false`，以及能力位 `regrade_over_http: false` / `regrade_over_cli: false`（重评分本期只有库层入口）。每个 run 另在 `evidence` 里落盘自己当时的证据边界（两类采集开关及逐 task 差异、`allow_subject` 放行清单、规范与映射版本、脱敏处理标识与版本），run 详情与列表再附一个 `regrade: {available, reason, exposed_over_http: false}`：本变更前落盘的 run 在此明确读出「不可重评」及其原因，而不是被静默当成等价数据。对比接口的可比判定要同时过两道：统计口径相同 **且** 证据边界相同，否则 `not_comparable_reason` 会点名是哪一维不同（缺边界记录的历史 run 一律视为不可直接比较，而不是假定与今天同边界）。
 
 ## 6. 扩展点
 
 运行时协议见 `core/contract.py`（接入指南有实现示例），归一化与成本相关的扩展点各自成模块（`trace/mapping.py`、`core/redaction.py`、`core/pricing.py`）：
 
-- `AgentRunner`（必选）— 执行任务，返回 `(trace_id, transcript, outcome)`
+- `AgentRunner`（必选）— 执行任务并**交付带来源的证据**：`run(view: TaskView, session: TrialSession) -> TrialEvidence`；`emit` 与运行中探针都是可选的递进能力
 - `TraceProvider` — 从 trace 后端拉 span 数据
 - `AttributeMapping` — span 属性名 → 标准观测的翻译表（`default_mapping(extra)` 注入宿主词汇）；换表即换证据边界，历史 run 因记录了当时版本而不被误判为同口径
 - `EvidenceRedactor` — 采集开启时强制应用的脱敏处理（整体替换，不叠加默认实现）；标识与版本随 run 落盘，审计看得见「谁换掉了默认摘要」
 - `PriceTable` — 成本折算的单价表（外部配置，无内置价目）；换价表会改变 `cost_usd`，故不配置时宁可不报
-- `Grader` — 逐 trial 评分（`EvalContext` 贯穿共享状态，`context.observations` 是已归一化的标准观测）
-- `Storage` — 持久化 runs/suites/人工评分请求
-- `EnvironmentManager` — 每 trial 环境 setup/teardown/快照/泄漏检测/恢复
+- `Grader` — 逐 trial 评分（`EvalContext` 贯穿共享状态；`context.observations` 是已归一化的标准观测，`context.evidence` 是按本判据 `evidence` 声明过滤后的证据视图）。声明 `evidence_levels` 与 `implementation_version` 后，结论可被审计到「依据哪几级、由哪一版判的」
+- `Storage` — 持久化 runs/suites/人工评分请求，另有两组**可选**方法：`save_trial_evidence / get_trial_evidence` 与 `save_grade_attempt / list_grade_attempts`（不实现则该批 run 可读、可评但不可重评分）
+- `EnvironmentManager` — 每 trial 环境 setup/teardown/快照/泄漏检测/恢复，加**取证探针** `probe(channel)`：由框架在 teardown 之前调用，读数一律记 `harness` 级；没有默认实现，不传即没有环境
 
 LLM 侧依赖统一经 `LLMFn` 回调（`(system, user) → text`）与指标注册表注入；缺配置或判分无法解析时返回带原因的 `invalid` 结论（`judge_unavailable` / `verdict_unparseable`），既不崩溃也不折成 agent 的 0 分。
 

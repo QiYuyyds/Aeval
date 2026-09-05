@@ -10,6 +10,9 @@
 | `required` | false | `HYBRID` 策略下必须通过，否则任务失败 |
 | `sample_count` | 1 | LLM Judge 多采样次数（1-10，算 confidence） |
 | `dependencies` | [] | 依赖的其他评分器名（拓扑排序；依赖未通过 → 本评分器跳过） |
+| `evidence` | `[harness, runner]` | 本判据**允许消费**的来源级别。默认不含 `subject`（被评方自报）；收紧为 `[harness]` 即「只认评测侧独立取证」，不能为空 |
+| `allow_subject` | false | 逃生开关：显式打开后自报证据可单独支撑通过，该选择随 run 落盘且结论被标成弱证据 |
+| `judgment_moment` | `at_end` | 环境状态类判据所依据的时刻：`at_end` / `not_at_end` / `any_time`；所用时刻随结论可见 |
 | `config` | {} | 类型特定配置（见下） |
 
 ## 判定态（verdict）— grader 结论的三态
@@ -37,6 +40,8 @@
 | `unclassified_agent_error` | agent 报错但接入方未声明类别 → 需人工判定，不折算通过与否 |
 | `external_dependency_unavailable` | 接入方声明的外部依赖不可达（上游服务/凭据/网络） |
 | `trial_cancelled` | 取消生效后该 trial 未运行（评测没跑完） |
+| `evidence_level_mismatch` | 结论依据了本判据**未声明**的来源级别（如声明只认 `harness` 却用 `runner` 级观测打了分） |
+| `subject_only_evidence` | 结论只由被评方自报证据支撑，且套件没写 `allow_subject` |
 
 规则：
 
@@ -74,6 +79,45 @@ class MyGrader:
 
 抛异常也可以——runner 会兜底记 `grader_error`，但显式返回能保留更准确的原因与解释。
 
+## 证据分级取信 — 谁观测到的决定这条结论值多少
+
+一次 trial 交付的每条读数都带 `observed_by`：`harness`（评测侧在环境停止前独立取证）> `runner`（接入适配层交付）> `subject`（被评 agent 自己写出的内容）。评分器只能消费它**声明**过的级别，两条默认规则由框架统一执行：
+
+| 规则 | 触发 | 结果 |
+|------|------|------|
+| 自报不得单独定案 | 通过结论只由 `subject` 级支撑且未写 `allow_subject` | `invalid` / `subject_only_evidence` |
+| 未声明即读不到 | 结论依据了 `evidence` 里没有的级别 | `invalid` / `evidence_level_mismatch` |
+
+两条的文案互相区分，因为该修的东西不同：一条要补取证通道，一条要改声明。被改写的原结论保留在 `details.rejected_score` / `rejected_explanation` 里 —— 无效不等于什么都没发生。
+
+```yaml
+# 对抗/外部场景: 只认评测侧独立取证
+- type: state
+  name: state_check
+  evidence: [harness]
+  judgment_moment: at_end
+  config:
+    expectations: [{ type: file_exists, path: "output.py" }]
+
+# 逃生舱: 允许自报单独支撑通过 (会留下弱证据标记)
+- type: state
+  name: state_check
+  allow_subject: true
+  evidence: [harness, runner, subject]
+```
+
+**结论与汇总都披露分量**：`grader_results[].evidence_levels` 是这条结论依据的级别，`trial.weakest_evidence` 是支撑它的最弱一级，`TaskSummary.evidence_levels` / `RunSummary.evidence_levels` 是 valid trial 按最弱一级的计数，`subject_only_trials` 单列弱证据通过数。同样一个 1.0，「全靠 agent 自述」与「评测侧自己看过环境」在报告里必须看得出来。
+
+**环境状态类判据要声明判定时刻**（`judgment_moment`，默认 `at_end`）：
+
+| 取值 | 含义 | 只有一次结束态取证时 |
+|------|------|---------------------|
+| `at_end` | 结束时成立 | 正常判定 |
+| `not_at_end` | 结束时不成立（断言已被清掉） | 正常判定（期望取反） |
+| `any_time` | 历史上任一时刻成立 | **报证据不足** —— 不得拿结束态冒充全时段观测 |
+
+取证可以在运行中发生，所以「终态」不再只有一个时刻：中途建完又删掉的文件，在默认 `at_end` 下就是不成立 —— 只取最后一次快照会把它判成通过，而发现这种情况正是这类检查存在的理由。反过来，「任一时刻」需要评测侧真的在运行中取过证（≥2 次读数）才判得了。所用时刻随每条结论落盘（`grader_results[].judgment_moment`）。
+
 ## 证据边界 — 过程类 grader 共用的判定语义
 
 内置的过程类评分器（`tool_calls` / `step_level` / `transcript` / `artifact_check`）只读**归一化观测**：span 经属性翻译表转成标准观测后交给它们，评分器不认识任何宿主的私有属性名，也不看 span 名称。于是每条结论都必须能回答「我看到了哪些证据、哪些没看到、为什么」。
@@ -104,7 +148,7 @@ class MyGrader:
 
 **对汇总的影响**：证据不可用的 trial 走 ① 的 invalid 通道，因此它会把分母缩小而不是把通过率压低——这是有意的，但分母缩小本身有风险，所以 pytest 插件与 CLI 门禁在 invalid 占比超过 `invalid_ratio_limit`（默认 `0.2`）时直接把该 run 判为不可信。大批量出现 `evidence_unavailable` 通常意味着映射表缺条目或没装 trace 后端，属于接入问题，应当去修证据通道而不是调阈值。`unrecognized_attributes` 非空正是「该更新映射了」的信号。
 
-**工具入参**：默认不采集（suite/task 的 `capture_tool_arguments`）。关闭时入参槽位是 `{"missing": true, "reason": "capture_disabled"}`，任何需要入参的判定报证据不可用；开启后入参必经脱敏钩子（默认摘要化，保留结构与可判定性）才落盘与呈现。详见集成指南 §8。
+**敏感证据（一套声明，两个字段）**：`capture.tool_arguments`（工具入参/结果）与 `capture.model_content`（模型输入输出正文）默认都关，可按 suite 或 task 逐字段开启；两者共用同一套语义 —— 默认不采、显式 opt-in、开启后强制经过默认脱敏、所用处理的标识随 run 落盘。关闭时对应槽位是 `{"missing": true, "reason": "capture_disabled"}`，任何依赖它的判定报证据不可用而**不判 agent 失败**；两个字段的状态各自独立，`run.evidence.capture_by_task` 与 `capture_content_by_task` 分别记录逐 task 生效值。体积实测：默认口径下单条 trial 的归档证据约 2 KB，开启正文并经默认摘要脱敏后几乎不变（正文被换成定长摘要）；只有换成 `IdentityEvidenceRedactor` 这类保留明文的钩子时才会涨 —— 实测 2,352 字符正文约 9 KB、73,899 字符约 224 KB。详见集成指南 §8。
 
 ## code_based（type: code）— 确定性检查
 
@@ -148,14 +192,26 @@ class MyGrader:
 ```yaml
 - type: state
   name: state_check
+  evidence: [harness, runner]   # 默认: 不采信被评方自报
+  judgment_moment: at_end       # 默认: 判结束态
   config:
+    threshold: 1.0
     expectations:
       - { type: file_exists,   path: "output.py" }
       - { type: file_contains, path: "output.py", value: "def main" }
+      - { type: file_regex,    path: "main.py", value: "^import " }
       - { type: db_record,     table: "users", match: {"id": 1} }
+      - { type: no_conflict_markers, path: "merged.py" }
 ```
 
-`expectations` 为空 → `invalid` / `no_criteria_configured`。
+这条判据以前读的是 `trial.outcome` —— 也就是被评方自己序列化上交的那个字典：agent 想让 `files` 里出现什么，判据就判什么通过。现在它按级别取信：
+
+- 先问**评测侧取证**（环境管理器的 `probe()` 在 teardown 之前读到的清单 / dump），其次问**适配层交付**的终态；
+- 被评方自报（`subject`）默认不进入判定，只有 `allow_subject: true` 才行，且那条通过会被标成弱证据；
+- 一条期望被哪一级满足，就记在 `evidence_levels` 里；`details.expectations[]` 逐条给出 `supported_by` 与 `consulted`，可以复核到底是「评测侧看到了」还是「它自己说的」；
+- 被允许的那几级**一条读数都没有**时 → `invalid` / `evidence_unavailable`，解释里点名缺哪一级（而不是拿空清单判「环境里确实没有」，也不是打一个看起来正常的 0 分）。
+
+期望类型读的是状态字典里的 `files`（`{路径: 内容}`）与 `db_records`（记录列表）两类键；状态读数由接入方/探针自己组织，框架不规定环境长什么样。`expectations` 为空 → `invalid` / `no_criteria_configured`。
 
 ## tool_calls（type: tool_calls）— 工具调用验证
 

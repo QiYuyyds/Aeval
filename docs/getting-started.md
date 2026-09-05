@@ -42,6 +42,8 @@ Results Summary
 ────────────────────────────────────────────────────────
   Run: run_xxxxxxxxxxxx  Status: completed  Duration: 0.1s
   Statistics version: 2
+  Evidence: runner=6
+  Regrade: available
   Pass@1:  100.0%  [95% CI 61.0%..100.0%]
   Pass@2:  100.0%  [95% CI 61.0%..100.0%]
   Pass@3:  100.0%  [95% CI 61.0%..100.0%]
@@ -55,6 +57,8 @@ Results Summary
 ```
 
 注意 `Pass@1: 100.0% [95% CI 61.0%..100.0%]`：6 个 trial 全通过是真的全通过，但 6 次观测不足以支撑「这个 agent 一定能做对」—— 区间下界 61% 就是这个诚实的提醒。想要更窄的区间就加 `--trials`。
+
+`Evidence: runner=6` 说的是同一件事的另一半：这 6 条通过全部由**适配层交付**的观测支撑（mock 没实现评测侧取证探针），不是评测框架自己去看环境看到的。接一个真实环境并实现 `probe()` 之后，这一行会变成 `harness=N`；出现 `subject=N` 则说明有结论依赖了 agent 的自述，需要 `allow_subject` 显式放行才可能成立。`Regrade: available` 表示这批证据已归档，可以在**不再跑一次 agent** 的前提下重新评分（库层 `EvalRunner.regrade_run`）。
 
 ## 3. 查看结果
 
