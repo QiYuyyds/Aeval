@@ -25,9 +25,11 @@ from agent_eval.core.types import (
     EvalTask,
     GraderResult,
     GraderType,
+    ObservedBy,
     TrialResult,
     TrialVerdict,
 )
+from agent_eval.graders._evidence import consulted_levels, implementation_version_of
 
 
 class HumanGrader:
@@ -39,6 +41,9 @@ class HumanGrader:
     """
 
     name = "human"
+    # 呈给评审人的是正文与被评侧状态; 评审人自己就是最高一级来源
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
+    implementation_version = "2"
 
     def __init__(self, storage: Any | None = None):
         self.storage = storage
@@ -51,6 +56,7 @@ class HumanGrader:
         context: EvalContext | None = None,
     ) -> GraderResult:
         config = task.get_grader_config(self.name)
+        evidence = context.evidence if context is not None else None
 
         request: dict[str, Any] = {
             "run_id": context.run_id if context else "",
@@ -61,6 +67,12 @@ class HumanGrader:
             "instructions": config.get("instructions", ""),
             "transcript": trial.transcript,
             "outcome": trial.outcome,
+            # 评审人该知道自己看的是谁的观测 —— 自报内容不该被当成取证
+            "observed_by": [
+                level.value
+                for level in consulted_levels(evidence, "transcript", "subject_state")
+            ],
+            "grader_version": implementation_version_of(self),
             "created_at": time.time() * 1000,
         }
 

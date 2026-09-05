@@ -13,7 +13,9 @@ import pytest
 import pytest_asyncio
 
 from agent_eval.api.app import create_app as create_eval_app
+from agent_eval.core.contract import TrialSession
 from agent_eval.core.runner import EvalRunner
+from agent_eval.core.types import TaskView, TrialEvidence
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.metrics.base import Metric, MetricResult
 from agent_eval.storage.memory import MemoryStorage
@@ -38,19 +40,23 @@ class ScriptedMetric(Metric):
 class ScriptedAgent:
     """t1 成功 / t2 失败 (失败 transcript 携带原始 prompt, 供回归提取)"""
 
-    async def run(self, task):
-        if task.id == "t2":
-            return (
-                "trace_t2_fail",
-                [{"role": "user", "content": task.prompt},
-                 {"role": "assistant", "content": "broken answer"}],
-                {"success": False, "error": "boom"},
+    async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence:
+        if view.id == "t2":
+            return TrialEvidence.runner_reported(
+                trace_id="trace_t2_fail",
+                transcript=[
+                    {"role": "user", "content": view.prompt},
+                    {"role": "assistant", "content": "broken answer"},
+                ],
+                state={"success": False, "error": "boom"},
             )
-        return (
-            "trace_t1_ok",
-            [{"role": "user", "content": task.prompt},
-             {"role": "assistant", "content": "fine answer"}],
-            {"success": True},
+        return TrialEvidence.runner_reported(
+            trace_id="trace_t1_ok",
+            transcript=[
+                {"role": "user", "content": view.prompt},
+                {"role": "assistant", "content": "fine answer"},
+            ],
+            state={"success": True},
         )
 
 

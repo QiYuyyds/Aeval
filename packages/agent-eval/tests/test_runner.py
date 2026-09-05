@@ -4,7 +4,8 @@ import logging
 
 import pytest
 
-from agent_eval.core.runner import EvalRunner, NoOpEnvironment
+from agent_eval.core.contract import TrialSession
+from agent_eval.core.runner import EvalRunner
 from agent_eval.core.types import (
     EvalSuite,
     EvalTask,
@@ -12,7 +13,9 @@ from agent_eval.core.types import (
     GraderResult,
     GraderType,
     InvalidReason,
+    TaskView,
     TerminationReason,
+    TrialEvidence,
     TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
@@ -69,7 +72,7 @@ def make_runner(agent, *, graders=None, environment=None, storage=None, **kwargs
         agent_runner=agent,
         trace_provider=MockTraceProvider(),
         storage=storage or MemoryStorage(),
-        environment=environment or NoOpEnvironment(),
+        environment=environment,
         graders=graders or [],
         retry_base_delay=0.01,
         **kwargs,
@@ -79,8 +82,8 @@ def make_runner(agent, *, graders=None, environment=None, storage=None, **kwargs
 # ─── 3.1 环境泄漏检测 ─────────────────────────────────────────────────────────
 
 
-class LeakEnvironment(NoOpEnvironment):
-    """对指定 task 报告泄漏的环境管理器"""
+class LeakEnvironment:
+    """对指定 task 报告泄漏的环境管理器 (其余动作都是 no-op)"""
 
     def __init__(self, dirty_tasks: set[str]):
         self.dirty_tasks = dirty_tasks
@@ -90,6 +93,9 @@ class LeakEnvironment(NoOpEnvironment):
 
     async def setup(self, task: EvalTask) -> None:
         self.current_task = task.id
+
+    async def teardown(self, task: EvalTask) -> None:
+        return None
 
     async def snapshot(self) -> dict:
         return {"base": True}
@@ -423,11 +429,14 @@ class SequencedModelGrader:
 class FixedAgent:
     """每次返回完全相同结果的 AgentRunner (用于缓存命中测试)"""
 
-    async def run(self, task: EvalTask):
-        return (
-            "trace_fixed",
-            [{"role": "user", "content": task.prompt}, {"role": "assistant", "content": "fixed"}],
-            {"success": False, "files": {}, "artifacts": []},
+    async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence:
+        return TrialEvidence.runner_reported(
+            trace_id="trace_fixed",
+            transcript=[
+                {"role": "user", "content": view.prompt},
+                {"role": "assistant", "content": "fixed"},
+            ],
+            state={"success": False, "files": {}, "artifacts": []},
         )
 
 

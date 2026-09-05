@@ -293,6 +293,128 @@ tasks:
         with pytest.raises(SuiteLoadError, match="tags"):
             load_suite(_write(tmp_path, _task_yaml('    tags: [ok, "  "]\n')))
 
+    # ── 本变更新增: 统一采集声明 + 判据级取信字段 ──
+
+    def test_capture_block_inherits_field_by_field(self, tmp_path):
+        """suite 开正文、task 只关入参: 两个字段各自独立解析, 未写的字段继承。"""
+        suite = load_suite(_write(tmp_path, """
+name: capture-suite
+capture:
+  tool_arguments: true
+  model_content: true
+tasks:
+  - id: t1
+    prompt: a
+    capture:
+      tool_arguments: false
+    graders:
+      - type: code
+        name: code_based
+"""))
+        task = suite.tasks[0]
+        decision = suite.resolved_capture(task)
+        assert decision.tool_arguments is False      # task 收紧有效
+        assert decision.model_content is True        # 未写的字段继承 suite
+        assert suite.capture_for(task) is False      # 便捷读取与解析结果同源
+
+    def test_scalar_alias_mirrors_the_one_canonical_declaration(self, tmp_path):
+        """`capture_tool_arguments` 是别名, 折进同一处而不是变成第二个开关。"""
+        suite = load_suite(_write(tmp_path, """
+name: alias-suite
+capture_tool_arguments: true
+tasks:
+  - id: t1
+    prompt: a
+    capture:
+      model_content: true
+    graders:
+      - type: code
+        name: code_based
+"""))
+        assert suite.capture.tool_arguments is True
+        assert suite.capture_tool_arguments is True  # 镜像成实际生效值
+        decision = suite.resolved_capture(suite.tasks[0])
+        assert (decision.tool_arguments, decision.model_content) == (True, True)
+
+    def test_alias_conflicting_with_capture_block_is_rejected(self, tmp_path):
+        with pytest.raises(SuiteLoadError, match="同一个开关"):
+            load_suite(_write(tmp_path, """
+name: conflict-suite
+capture:
+  tool_arguments: true
+capture_tool_arguments: false
+tasks:
+  - id: t1
+    prompt: a
+    capture:
+      tool_arguments: false
+    graders:
+      - type: code
+        name: code_based
+"""))
+
+    def test_grader_evidence_declarations_load(self, tmp_path):
+        suite = load_suite(_write(tmp_path, """
+name: provenance-suite
+tasks:
+  - id: t1
+    prompt: a
+    graders:
+      - type: state
+        name: state_check
+        evidence: [harness]
+        judgment_moment: any_time
+      - type: code
+        name: code_based
+        allow_subject: true
+        evidence: [harness, runner, subject]
+"""))
+        narrowed, widened = suite.tasks[0].graders
+        assert narrowed.evidence == ["harness"]
+        assert narrowed.judgment_moment.value == "any_time"
+        assert narrowed.allow_subject is False
+        assert widened.allow_subject is True
+        assert [level.value for level in widened.evidence] == ["harness", "runner", "subject"]
+
+    def test_grader_defaults_are_the_two_trusted_levels(self, tmp_path):
+        suite = load_suite(_write(tmp_path, VALID_SUITE_YAML))
+        grader = suite.tasks[0].graders[0]
+        assert [level.value for level in grader.evidence] == ["harness", "runner"]
+        assert grader.allow_subject is False
+        assert grader.judgment_moment.value == "at_end"
+
+    @pytest.mark.parametrize("evidence_yaml,message", [
+        ("[]", "evidence 不能为空"),
+        ("[harness, harness]", "重复"),
+        ("[trustno1]", "evidence"),
+    ])
+    def test_illegal_evidence_declaration_rejected(self, tmp_path, evidence_yaml, message):
+        path = _write(tmp_path, f"""
+name: bad-evidence
+tasks:
+  - id: t1
+    prompt: a
+    graders:
+      - type: state
+        name: state_check
+        evidence: {evidence_yaml}
+""")
+        with pytest.raises(SuiteLoadError, match=message):
+            load_suite(path)
+
+    def test_illegal_judgment_moment_rejected(self, tmp_path):
+        with pytest.raises(SuiteLoadError, match="judgment_moment"):
+            load_suite(_write(tmp_path, """
+name: bad-moment
+tasks:
+  - id: t1
+    prompt: a
+    graders:
+      - type: state
+        name: state_check
+        judgment_moment: at_the_start
+"""))
+
     def test_duplicate_tags_rejected(self, tmp_path):
         with pytest.raises(SuiteLoadError, match="重复"):
             load_suite(_write(tmp_path, _task_yaml("    tags: [a, a]\n")))

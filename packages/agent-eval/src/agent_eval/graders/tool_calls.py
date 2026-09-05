@@ -28,10 +28,17 @@ from __future__ import annotations
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    ObservedBy,
+    TrialResult,
+)
 from agent_eval.graders._evidence import (
     evidence_report,
     evidence_unavailable_result,
+    implementation_version_of,
     observations_for,
     render,
 )
@@ -43,6 +50,9 @@ class ToolCallsGrader:
     """工具调用验证评分器"""
 
     name = "tool_calls"
+    # 步骤序列来自 trace (适配层埋点交付); 评测侧若把探针步骤也写进证据则可读
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER)
+    implementation_version = "2"
 
     async def grade(
         self,
@@ -125,7 +135,10 @@ class ToolCallsGrader:
                 "f1": f1,
                 "unnamed_tool_calls": unnamed_calls,
                 "evidence": evidence_report(observations),
+                "grader_version": implementation_version_of(self),
             },
+            # trace 观测由适配层埋点交付: 它是 runner 级, 不是评测侧独立取证
+            evidence_levels=[ObservedBy.RUNNER],
         )
 
 

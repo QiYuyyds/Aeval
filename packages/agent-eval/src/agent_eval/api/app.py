@@ -101,6 +101,8 @@ def meta_payload(
             "spec_version": OTEL_GENAI_SPEC_VERSION,
             "mapping_version": ATTRIBUTE_MAPPING_VERSION,
             "tool_arguments_captured_by_default": False,
+            "model_content_captured_by_default": False,
+            "capture_is_one_declaration": True,
         },
         "capabilities": {
             "graders": [g["name"] for g in get_grader_catalog()],
@@ -114,6 +116,18 @@ def meta_payload(
             "normalized_trace_observations": True,
             "termination_reasons": True,
             "cost_axis": True,
+            "evidence_provenance_levels": True,
+            "deferred_grading": True,
+            # 重评分本期只有库层入口 (EvalRunner.regrade_run)。它牵涉同一大版本的
+            # 响应结构兼容承诺, 暴露面另立变更 —— 列出来免得调用方以为 /runs 上能调。
+            "regrade_over_http": False,
+            "regrade_over_cli": False,
+        },
+        "not_exposed": {
+            "regrade": (
+                "证据归档与重评分已落地 (EvalRunner.regrade_run / verdict_drift), "
+                "但 HTTP 与 CLI 入口本期未提供"
+            )
         },
     }
 

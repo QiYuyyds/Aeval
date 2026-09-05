@@ -18,7 +18,12 @@ from typing import Any
 
 import aiosqlite
 
-from agent_eval.core.types import EvalSuite, RunResult
+from agent_eval.core.types import (
+    EvalSuite,
+    GradeAttempt,
+    RunResult,
+    TrialEvidence,
+)
 from agent_eval.dataset.storage import SqliteDatasetStorage
 
 
@@ -69,6 +74,25 @@ class SqliteStorage:
                     created_at REAL
                 );
 
+                CREATE TABLE IF NOT EXISTS trial_evidence (
+                    run_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    trial_index INTEGER NOT NULL,
+                    data TEXT,
+                    archived_at REAL,
+                    PRIMARY KEY (run_id, task_id, trial_index)
+                );
+
+                CREATE TABLE IF NOT EXISTS grade_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    trial_index INTEGER NOT NULL,
+                    is_current INTEGER NOT NULL,
+                    created_at REAL,
+                    data TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_runs_suite
                     ON runs(suite_name);
                 CREATE INDEX IF NOT EXISTS idx_runs_status
@@ -77,6 +101,12 @@ class SqliteStorage:
                     ON runs(started_at);
                 CREATE INDEX IF NOT EXISTS idx_human_requests_run
                     ON human_score_requests(run_id);
+                CREATE INDEX IF NOT EXISTS idx_evidence_run
+                    ON trial_evidence(run_id);
+                CREATE INDEX IF NOT EXISTS idx_attempts_run
+                    ON grade_attempts(run_id);
+                CREATE INDEX IF NOT EXISTS idx_attempts_current
+                    ON grade_attempts(run_id, task_id, trial_index, is_current);
             """)
         await self.datasets.initialize()
         self._initialized = True
@@ -143,7 +173,7 @@ class SqliteStorage:
             return [RunResult(**json.loads(r["data"])) for r in rows]
 
     async def delete_run(self, run_id: str) -> bool:
-        """删除运行结果 (一并清除其派生的持久化内容)"""
+        """删除运行结果 (一并清除其证据、判定条目与派生内容)"""
         self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
@@ -151,6 +181,8 @@ class SqliteStorage:
             await db.execute(
                 "DELETE FROM human_score_requests WHERE run_id = ?", (run_id,)
             )
+            await db.execute("DELETE FROM trial_evidence WHERE run_id = ?", (run_id,))
+            await db.execute("DELETE FROM grade_attempts WHERE run_id = ?", (run_id,))
             await db.commit()
             return cursor.rowcount > 0
 
@@ -240,3 +272,92 @@ class SqliteStorage:
                 )
             rows = await cursor.fetchall()
             return [json.loads(r["data"]) for r in rows]
+
+    # ── 证据归档 ──
+
+    async def save_trial_evidence(
+        self, run_id: str, task_id: str, trial_index: int, evidence: TrialEvidence
+    ) -> None:
+        """按 trial 独立归档证据 (整包 JSON; 来源级别与缺失原因随读数一起留下)。"""
+        self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO trial_evidence
+                   (run_id, task_id, trial_index, data, archived_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    task_id,
+                    trial_index,
+                    json.dumps(
+                        evidence.model_dump(mode="json"), ensure_ascii=False, default=str
+                    ),
+                    time.time(),
+                ),
+            )
+            await db.commit()
+
+    async def get_trial_evidence(
+        self, run_id: str, task_id: str, trial_index: int
+    ) -> TrialEvidence | None:
+        """完整取回一次 trial 的证据。"""
+        self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT data FROM trial_evidence "
+                "WHERE run_id = ? AND task_id = ? AND trial_index = ?",
+                (run_id, task_id, trial_index),
+            )
+            row = await cursor.fetchone()
+            return TrialEvidence.model_validate(json.loads(row["data"])) if row else None
+
+    # ── 判定历史 ──
+
+    async def save_grade_attempt(self, attempt: GradeAttempt) -> None:
+        """追加判定条目: 同一条 trial 的旧条目只移走 current 指针, 永不被覆盖。"""
+        self._ensure_initialized()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE grade_attempts SET is_current = 0 "
+                "WHERE run_id = ? AND task_id = ? AND trial_index = ? AND is_current = 1",
+                (attempt.run_id, attempt.task_id, attempt.trial_index),
+            )
+            await db.execute(
+                """INSERT OR REPLACE INTO grade_attempts
+                   (attempt_id, run_id, task_id, trial_index, is_current, created_at, data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    attempt.attempt_id,
+                    attempt.run_id,
+                    attempt.task_id,
+                    attempt.trial_index,
+                    1 if attempt.is_current else 0,
+                    attempt.created_at,
+                    json.dumps(attempt.model_dump(mode="json"), ensure_ascii=False, default=str),
+                ),
+            )
+            await db.commit()
+
+    async def list_grade_attempts(
+        self, run_id: str, task_id: str | None = None, trial_index: int | None = None
+    ) -> list[GradeAttempt]:
+        """按时间升序返回判定条目 (原结论与重评结论并列可查)。"""
+        self._ensure_initialized()
+        clauses = ["run_id = ?"]
+        params: list[Any] = [run_id]
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if trial_index is not None:
+            clauses.append("trial_index = ?")
+            params.append(trial_index)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"SELECT data FROM grade_attempts WHERE {' AND '.join(clauses)} "
+                "ORDER BY created_at ASC, attempt_id ASC",
+                tuple(params),
+            )
+            rows = await cursor.fetchall()
+            return [GradeAttempt.model_validate(json.loads(r["data"])) for r in rows]

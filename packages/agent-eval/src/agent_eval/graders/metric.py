@@ -25,9 +25,11 @@ from agent_eval.core.types import (
     GraderResult,
     GraderType,
     InvalidReason,
+    ObservedBy,
     TrialResult,
     TrialVerdict,
 )
+from agent_eval.graders._evidence import consulted_levels, implementation_version_of
 from agent_eval.graders._verdicts import no_criteria_result
 from agent_eval.metrics.base import (
     METRIC_CALC_ERRORS as _CALC_ERRORS,
@@ -44,6 +46,9 @@ class MetricGrader:
     """按 config.metric_name 从注入注册表分发到对应 Metric 计算"""
 
     name = "metric"
+    # 指标读的是正文 (输入/实际输出), 正文可能是 agent 自述 → 声明到 subject 一级
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
+    implementation_version = "2"
 
     def __init__(
         self,
@@ -121,7 +126,11 @@ class MetricGrader:
                 "metric": result.name,
                 "metric_threshold": result.threshold,
                 "grader_threshold": threshold,
+                "grader_version": implementation_version_of(self),
             },
+            evidence_levels=consulted_levels(
+                context.evidence if context is not None else None, "transcript"
+            ),
         )
 
     # ── Config resolution ────────────────────────────────────────────────
@@ -171,6 +180,7 @@ class MetricGrader:
         details: dict[str, Any] | None = None,
         verdict: TrialVerdict = TrialVerdict.VALID,
         invalid_reason: InvalidReason | None = None,
+        evidence_levels: list[ObservedBy] | None = None,
     ) -> GraderResult:
         return GraderResult(
             grader_name=config.name,
@@ -181,4 +191,5 @@ class MetricGrader:
             details=details or {},
             verdict=verdict,
             invalid_reason=invalid_reason,
+            evidence_levels=evidence_levels or [],
         )

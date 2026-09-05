@@ -15,6 +15,7 @@ from agent_eval.core.types import (
     GraderType,
     InvalidReason,
     ScoreStrategy,
+    TrialEvidence,
     TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
@@ -274,12 +275,15 @@ async def test_metric_result_cached_by_content():
     # 确定性 agent: transcript/outcome 完全一致才能命中内容寻址缓存
     # (MockAgentRunner 每次生成随机 artifact id, 不适合本测试)
     class DeterministicAgent:
-        async def run(self, task):
-            transcript = [
-                {"role": "user", "content": task.prompt},
-                {"role": "assistant", "content": "fixed answer"},
-            ]
-            return "trace_fixed", transcript, {"success": True}
+        async def run(self, view, session):
+            return TrialEvidence.runner_reported(
+                trace_id="trace_fixed",
+                transcript=[
+                    {"role": "user", "content": view.prompt},
+                    {"role": "assistant", "content": "fixed answer"},
+                ],
+                state={"success": True},
+            )
 
     runner = EvalRunner(
         agent_runner=DeterministicAgent(),

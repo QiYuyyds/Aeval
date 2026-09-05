@@ -22,6 +22,8 @@ from agent_eval.trace.mapping import (
     FIELD_ERROR_TYPE,
     FIELD_INPUT_TOKENS,
     FIELD_MODEL,
+    FIELD_MODEL_INPUT_CONTENT,
+    FIELD_MODEL_OUTPUT_CONTENT,
     FIELD_OPERATION_NAME,
     FIELD_OUTPUT_TOKENS,
     FIELD_REASONING_TOKENS,
@@ -73,12 +75,95 @@ _TOKEN_FIELDS = (
 _ERROR_STATUS_CODES = frozenset({"error", "status_error", "2"})
 _OK_STATUS_CODES = frozenset({"ok", "status_ok", "1"})
 
+# 正文类字段 → 管它的采集开关。工具入参与模型正文共用一套「默认不采、显式
+# opt-in、开了也强制脱敏」的语义, 不是两套互不相干的规则。
+_CONTENT_FLAGS: dict[str, str] = {
+    FIELD_TOOL_ARGUMENTS: "tool_arguments",
+    FIELD_TOOL_RESULT: "tool_arguments",
+    FIELD_MODEL_INPUT_CONTENT: "model_content",
+    FIELD_MODEL_OUTPUT_CONTENT: "model_content",
+}
+
+
+def uncaptured_attribute_names(
+    table: AttributeMapping,
+    *,
+    tool_arguments: bool = False,
+    model_content: bool = False,
+) -> frozenset[str]:
+    """按采集声明该从 span 上摘掉的属性名 (名字全部来自翻译表)。"""
+    flags = {"tool_arguments": tool_arguments, "model_content": model_content}
+    names: set[str] = set()
+    for field, flag in _CONTENT_FLAGS.items():
+        if not flags[flag]:
+            names.update(table.candidates(field))
+    return frozenset(names)
+
+
+# 未授权采集的正文以标记顶替: 属性名必须留在 span 上 —— 角色判定要看这条 span
+# 有没有埋工具入参, 整条摘掉会把一次工具调用读成别的角色, 于是当场判的和事后
+# 重判的读到的不是同一份观测。
+UNCAPTURED_MARKER = "[uncaptured]"
+
+
+def filter_spans_for_capture(
+    spans: list[dict[str, Any]] | None,
+    *,
+    mapping: AttributeMapping | None = None,
+    tool_arguments: bool = False,
+    model_content: bool = False,
+    redactor: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """把 span 处理成**可落盘**的形式; 返回 (结果, 被遮掉的属性名)。
+
+    - 未 opt-in 的正文 → 标记: 不落盘也不参与判定, 否则事后重开会关就等于把当年
+      没被授权采集的内容补进证据里。
+    - 已 opt-in 的正文 → 强制脱敏形式: 归档不得存明文。
+    两种都只换值、不删属性 —— 角色判定要看这条 span 有没有埋工具入参, 整条摘掉
+    会把一次工具调用读成别的角色, 于是当场判的和事后重判的读到的是不同观测。
+    """
+    table = mapping or default_mapping()
+    masked_fields = uncaptured_attribute_names(
+        table, tool_arguments=tool_arguments, model_content=model_content
+    )
+    captured_fields = {
+        field
+        for field, flag in _CONTENT_FLAGS.items()
+        if (tool_arguments if flag == "tool_arguments" else model_content)
+    }
+    captured_names = {name for field in captured_fields for name in table.candidates(field)}
+    items = list(spans or [])
+    if not masked_fields and not captured_names:
+        return items, []
+    active = redactor or default_redactor()
+    masked: set[str] = set()
+    kept: list[dict[str, Any]] = []
+    for span in items:
+        attributes = span.get("attributes") if isinstance(span, dict) else None
+        if not isinstance(attributes, dict) or not (
+            (masked_fields | captured_names) & attributes.keys()
+        ):
+            kept.append(span)
+            continue
+        rewritten: dict[str, Any] = {}
+        for key, value in attributes.items():
+            if key in masked_fields:
+                masked.add(key)
+                rewritten[key] = UNCAPTURED_MARKER
+            elif key in captured_names:
+                rewritten[key] = active.redact(value, field=key)
+            else:
+                rewritten[key] = value
+        kept.append({**span, "attributes": rewritten})
+    return kept, sorted(masked)
+
 
 def normalize_spans(
     spans: list[dict[str, Any]] | None,
     *,
     mapping: AttributeMapping | None = None,
     capture_tool_arguments: bool = False,
+    capture_model_content: bool = False,
     redactor: Any | None = None,
     source_status: str | None = None,
     source_detail: str = "",
@@ -88,7 +173,8 @@ def normalize_spans(
     Args:
         spans: provider 返回的 span 列表 (None 视为什么都没取到)
         mapping: 属性翻译表; None = 内置 OTel GenAI 条目
-        capture_tool_arguments: 套件级入参/结果采集开关 (默认关)
+        capture_tool_arguments: 工具入参/结果采集开关 (默认关)
+        capture_model_content: 模型输入输出正文采集开关 (默认关; 与入参同一套语义)
         redactor: 采集开启时强制应用的脱敏处理; None = 默认摘要实现
         source_status: "ok" / "empty" / "unavailable"; None = 由 spans 推断
         source_detail: provider 报错原文等说明性信息
@@ -99,11 +185,20 @@ def normalize_spans(
         mapping_version=table.version,
     )
     items = list(spans or [])
+    # 归档用的 span 是可落盘形式 (未授权的遮成标记、授权过的脱敏); 观测本身仍从
+    # 原始 span 构建, 免得同一字段被脱敏两次而得出两个不同的摘要
+    archived, masked = filter_spans_for_capture(
+        items,
+        mapping=table,
+        tool_arguments=capture_tool_arguments,
+        model_content=capture_model_content,
+        redactor=redactor,
+    )
     if source_status is None:
         source_status = "ok" if items else "empty"
     trace.source_status = source_status  # type: ignore[assignment]
     trace.source_detail = source_detail
-    trace.source_spans = items if trace.source_status == "ok" else []
+    trace.source_spans = archived if trace.source_status == "ok" else []
 
     if trace.source_status != "ok":
         # 取证通道没产出: 计数报缺失而不是 0, 否则下游会把「没读到」当成「没做」
@@ -121,6 +216,12 @@ def normalize_spans(
 
     reader = _FieldReader(table, trace)
     known = table.attribute_names()
+    trace.stripped_attributes = masked
+
+    for field, flag in _CONTENT_FLAGS.items():
+        captured = capture_tool_arguments if flag == "tool_arguments" else capture_model_content
+        if not captured:
+            reader.register_absent(field, AbsentReason.CAPTURE_DISABLED)
 
     for span in items:
         attributes = span.get("attributes") if isinstance(span, dict) else None
@@ -264,7 +365,11 @@ def _captured(
     capture_tool_arguments: bool,
     redactor: Any,
 ) -> Any:
-    """入参/结果槽位: 未 opt-in 一律不读 (与规范自身的 Opt-In 立场一致)。"""
+    """入参/结果槽位: 未 opt-in 一律不读 (与规范自身的 Opt-In 立场一致)。
+
+    开关先于取值判定, 所以属性被裁剪过也不会把「没授权采」伪装成「宿主没埋」——
+    这两件事的修法完全不同, 不能混成同一个缺失原因。
+    """
     if not capture_tool_arguments:
         reader.register_absent(field, AbsentReason.CAPTURE_DISABLED)
         return Missing(AbsentReason.CAPTURE_DISABLED, "套件未开启工具入参采集")

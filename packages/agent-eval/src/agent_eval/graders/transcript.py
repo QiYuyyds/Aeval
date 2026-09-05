@@ -25,10 +25,17 @@ from __future__ import annotations
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    ObservedBy,
+    TrialResult,
+)
 from agent_eval.graders._evidence import (
     evidence_report,
     evidence_unavailable_result,
+    implementation_version_of,
     observations_for,
 )
 from agent_eval.trace.observations import NormalizedTrace, is_missing
@@ -38,6 +45,8 @@ class TranscriptGrader:
     """转录记录分析评分器"""
 
     name = "transcript"
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER)
+    implementation_version = "2"
 
     async def grade(
         self,
@@ -111,7 +120,9 @@ class TranscriptGrader:
                 "measured_components": sorted(components),
                 "unavailable": [field for field, _ in unavailable],
                 "evidence": evidence_report(observations),
+                "grader_version": implementation_version_of(self),
             },
+            evidence_levels=[ObservedBy.RUNNER],
         )
 
 

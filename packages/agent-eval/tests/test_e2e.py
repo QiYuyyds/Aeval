@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from agent_eval.core.runner import EvalRunner, NoOpEnvironment
+from agent_eval.core.runner import EvalRunner
 from agent_eval.core.types import (
     EvalSuite,
     EvalTask,
@@ -29,7 +29,7 @@ from agent_eval.storage.memory import MemoryStorage
 FAST = (0.0, 0.01)
 
 
-class LeakEnvironment(NoOpEnvironment):
+class LeakEnvironment:
     """t_deps 的 trial 结束后报告环境泄漏, 其余干净"""
 
     def __init__(self):
@@ -38,6 +38,9 @@ class LeakEnvironment(NoOpEnvironment):
 
     async def setup(self, task: EvalTask) -> None:
         self.current_task = task.id
+
+    async def teardown(self, task: EvalTask) -> None:
+        return None
 
     async def snapshot(self) -> dict:
         return {"base": True}

@@ -23,9 +23,17 @@ import re
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    ObservedBy,
+    TrialResult,
+)
 from agent_eval.graders._evidence import (
+    consulted_levels,
     evidence_report,
+    implementation_version_of,
     observations_for,
     render,
 )
@@ -37,6 +45,8 @@ class ArtifactCheckGrader:
     """产物检查评分器"""
 
     name = "artifact_check"
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
+    implementation_version = "2"
 
     async def grade(
         self,
@@ -55,10 +65,21 @@ class ArtifactCheckGrader:
                 self.name, GraderType.ARTIFACT, "expected_type/content_regex"
             )
 
+        evidence = context.evidence if context is not None else None
         observations = observations_for(spans, context)
-        # 优先用被评测方自报的 outcome, 其次才是 trace 里的产物观测
-        artifacts = trial.outcome.get("artifacts") or _from_observations(observations)
-        evidence = evidence_report(observations)
+        # 优先用被评测方上报的产物, 其次才是 trace 里的产物观测 —— 两条通道各自
+        # 带来源, 结论要能说出它依据的是哪一条 (上报的可能是 agent 自述)
+        reported = (trial.outcome or {}).get("artifacts") if trial else None
+        if reported:
+            artifacts = reported
+            used = consulted_levels(evidence, "subject_state", "artifacts")
+        else:
+            artifacts = _from_observations(observations)
+            used = consulted_levels(evidence, "artifacts") or [ObservedBy.RUNNER]
+        evidence_details = {
+            "evidence": evidence_report(observations),
+            "grader_version": implementation_version_of(self),
+        }
 
         if not artifacts:
             return GraderResult(
@@ -67,7 +88,7 @@ class ArtifactCheckGrader:
                 score=0.0,
                 passed=False,
                 explanation="No artifacts produced",
-                details={"evidence": evidence},
+                details=evidence_details,
             )
 
         # 检查类型
@@ -83,7 +104,8 @@ class ArtifactCheckGrader:
                         f"Expected type '{expected_type}', "
                         f"got {types}"
                     ),
-                    details={"artifacts": artifacts, "evidence": evidence},
+                    details={"artifacts": artifacts, **evidence_details},
+                    evidence_levels=used,
                 )
 
         # 检查内容
@@ -97,7 +119,8 @@ class ArtifactCheckGrader:
                     score=0.3,
                     passed=threshold <= 0.3,
                     explanation=f"Content does not match pattern: {content_regex}",
-                    details={"artifacts": artifacts, "evidence": evidence},
+                    details={"artifacts": artifacts, **evidence_details},
+                    evidence_levels=used,
                 )
 
         return GraderResult(
@@ -106,7 +129,8 @@ class ArtifactCheckGrader:
             score=1.0,
             passed=True,
             explanation=f"Artifact check passed: {len(artifacts)} artifact(s)",
-            details={"artifacts": artifacts, "evidence": evidence},
+            details={"artifacts": artifacts, **evidence_details},
+            evidence_levels=used,
         )
 
 

@@ -43,6 +43,9 @@ class HashingEvidenceRedactor:
 
     def _redact(self, value: Any, depth: int) -> Any:
         if isinstance(value, str):
+            # 幂等: 归档里的正文已是摘要形式, 重评分再读一次不得得到另一个值
+            if value.startswith(_DIGEST_PREFIX):
+                return value
             return self.digest(value)
         if depth >= _MAX_RECURSION_DEPTH:
             return self.digest(repr(value))

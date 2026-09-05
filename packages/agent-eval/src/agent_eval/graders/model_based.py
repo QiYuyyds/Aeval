@@ -31,19 +31,28 @@ from agent_eval.core.types import (
     GraderResult,
     GraderType,
     InvalidReason,
+    ObservedBy,
     TrialResult,
     TrialVerdict,
 )
+from agent_eval.graders._evidence import consulted_levels, implementation_version_of
 from agent_eval.graders._verdicts import no_criteria_result
 
 # Type alias for LLM function: (system_prompt, user_message) -> str
 LLMFn = Callable[[str, str], str]
+
+# 未显式配置模型时的默认判定模型 (随每次判定落盘, 使「换了 judge」这件事可追溯)
+DEFAULT_JUDGE_MODEL = "gpt-4o-mini"
 
 
 class ModelBasedGrader:
     """LLM-as-Judge 评分器"""
 
     name = "model_based"
+    # judge 读的是对话正文: 正文可能是 agent 自述, 因此声明到 subject 一级,
+    # 由套件的 allow_subject 决定它能不能单独定案
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
+    implementation_version = "2"
 
     def __init__(self, llm_fn: LLMFn | None = None):
         """
@@ -107,6 +116,10 @@ class ModelBasedGrader:
         # 分母固定为配置的全集维度数: 缺席维度不得被「只平均已给分维度」充值
         avg_score = sum(scores.values()) / len(dimensions)
         missing = [d for d in dimensions if d not in scores]
+        judged = {
+            "judge_model": config.get("model", DEFAULT_JUDGE_MODEL),
+            "grader_version": implementation_version_of(self),
+        }
         if missing:
             return GraderResult(
                 grader_name=self.name,
@@ -114,7 +127,7 @@ class ModelBasedGrader:
                 score=max(0.0, min(1.0, avg_score)),
                 passed=False,
                 explanation=f"LLM Judge 未返回全部维度 (缺席: {missing})",
-                details={"dimensions": scores, "missing": missing, "raw_response": raw},
+                details={"dimensions": scores, "missing": missing, "raw_response": raw, **judged},
                 verdict=TrialVerdict.INVALID,
                 invalid_reason=InvalidReason.VERDICT_UNPARSEABLE,
             )
@@ -125,7 +138,10 @@ class ModelBasedGrader:
             score=max(0.0, min(1.0, avg_score)),
             passed=avg_score >= threshold,
             explanation=f"LLM Judge scores: {scores}",
-            details={"dimensions": scores, "raw_response": raw},
+            details={"dimensions": scores, "raw_response": raw, **judged},
+            evidence_levels=consulted_levels(
+                context.evidence if context is not None else None, "transcript"
+            ),
         )
 
     def _build_prompt(

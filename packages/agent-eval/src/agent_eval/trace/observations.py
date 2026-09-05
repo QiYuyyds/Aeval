@@ -102,6 +102,8 @@ class NormalizedTrace:
     llm_call_count: Any = 0
 
     unrecognized_attributes: list[str] = field(default_factory=list)
+    # 按采集声明被整条摘掉的属性名: 「没采到」与「采了但没授权落盘」要能分开
+    stripped_attributes: list[str] = field(default_factory=list)
     missing_fields: dict[str, str] = field(default_factory=dict)
     # 原始 span 随观测保留: 既供第三方 grader 沿用旧签名, 也使结论可回溯到原文
     source_spans: list[dict[str, Any]] = field(default_factory=list)

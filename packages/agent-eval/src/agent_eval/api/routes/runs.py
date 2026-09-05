@@ -64,6 +64,7 @@ async def list_runs(suite_name: str | None = None, limit: int = 50):
                 "duration_ms": r.duration_ms,
                 "statistics_version": r.statistics_version,
                 "evidence": r.evidence.model_dump() if r.evidence else None,
+                "regrade": _regrade_entry(r),
                 "task_count": len(r.trials),
                 "summary": r.summary.model_dump() if r.summary else None,
             }
@@ -175,6 +176,8 @@ async def get_run(run_id: str):
         "error": run.error,
         "statistics_version": run.statistics_version,
         "evidence": run.evidence.model_dump() if run.evidence else None,
+        # 本期只开库层重评分入口: 这里如实标能不能重评与原因, 不提供 HTTP 触发
+        "regrade": _regrade_entry(run),
         "trials": {
             task_id: [
                 {
@@ -192,6 +195,11 @@ async def get_run(run_id: str):
                     "metrics": t.metrics,
                     "evidence_gaps": [gap.model_dump() for gap in t.evidence_gaps],
                     "unrecognized_attributes": t.unrecognized_attributes,
+                    # 结论的分量: 它依据的最弱一级证据 + 证据是否已归档
+                    "weakest_evidence": (
+                        t.weakest_evidence.value if t.weakest_evidence else None
+                    ),
+                    "evidence_archived": t.evidence_archived,
                     "grader_results": [
                         {
                             "grader_name": gr.grader_name,
@@ -202,6 +210,13 @@ async def get_run(run_id: str):
                             "invalid_reason": (
                                 gr.invalid_reason.value if gr.invalid_reason else None
                             ),
+                            "evidence_levels": [
+                                level.value for level in gr.evidence_levels
+                            ],
+                            "judgment_moment": (
+                                gr.judgment_moment.value if gr.judgment_moment else None
+                            ),
+                            "subject_only": gr.subject_only,
                         }
                         for gr in t.grader_results
                     ],
@@ -212,6 +227,14 @@ async def get_run(run_id: str):
         },
         "summary": run.summary.model_dump() if run.summary else None,
     }
+
+
+def _regrade_entry(run) -> dict[str, Any]:
+    """能不能重评分 + 为什么不能 (与库层 ``regrade_run`` 共用同一份判断)。"""
+    from agent_eval.core.runner import regrade_state
+
+    possible, reason = regrade_state(run)
+    return {"available": possible, "reason": reason, "exposed_over_http": False}
 
 
 @router.delete("/{run_id}")

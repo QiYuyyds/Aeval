@@ -113,6 +113,25 @@ def _denominator_line(summary) -> str:
     )
 
 
+def _evidence_line(run) -> str:
+    """证据强度 + 可否重评分: 通过率相同的两个 run, 分量可能完全不同。"""
+    from agent_eval.core.runner import regrade_state
+
+    summary = run.summary
+    mix = getattr(summary, "evidence_levels", None) or {}
+    weak = getattr(summary, "subject_only_trials", 0) or 0
+    text = "  Evidence: " + (
+        "  ".join(f"{level}={count}" for level, count in sorted(mix.items()))
+        if mix
+        else "unknown (历史 run 未记录来源分级)"
+    )
+    if weak:
+        text += f"  weak-evidence passes: {weak}"
+    possible, reason = regrade_state(run)
+    text += "\n  Regrade: " + ("available" if possible else f"no — {reason}")
+    return text
+
+
 def _pass1(summary_or_task) -> float | None:
     """实测 pass@1; 键缺失或值为 None 都算证据不足 (task 或 run 汇总通用)。"""
     rates = getattr(summary_or_task, "pass_at_k", None) or {}
@@ -177,6 +196,7 @@ def _print_run_summary(run) -> None:
         + (f"  Duration: {duration / 1000:.1f}s" if duration else "")
     )
     typer.echo(f"  Statistics version: {run.statistics_version or 'unknown'}")
+    typer.echo(_evidence_line(run))
     for k, rate in _k_display(summary.pass_at_k):
         typer.echo(f"  Pass@{k}:  {_rate_with_ci(summary, 'estimates', k, rate)}")
     for k, rate in _k_display(summary.pass_power_k):
@@ -470,6 +490,7 @@ def show(
         return
 
     typer.echo(f"Statistics version: {run.statistics_version or 'unknown'}")
+    typer.echo(_evidence_line(run))
     for k, rate in _k_display(summary.pass_at_k):
         typer.echo(f"  Pass@{k}:  {_rate_with_ci(summary, 'estimates', k, rate)}")
     for k, rate in _k_display(summary.pass_power_k):
@@ -526,16 +547,34 @@ def show(
             typer.echo(
                 f"  trial {t.trial_index}: {'PASS' if t.success else 'FAIL'} "
                 f"[verdict {_verdict_text(t)}] "
-                f"(score {t.avg_score():.4f}, {t.duration_ms:.0f}ms"
+                + (
+                    f"[evidence {t.weakest_evidence.value}]"
+                    if t.weakest_evidence is not None
+                    else "[evidence unknown]"
+                )
+                + f"(score {t.avg_score():.4f}, {t.duration_ms:.0f}ms"
                 + (f", error: {t.error}" if t.error else "") + ")"
             )
             for gr in t.grader_results:
+                weak = " [WEAK: subject-only]" if gr.subject_only else ""
                 typer.echo(
                     f"    - {gr.grader_name} [{gr.grader_type.value}]: "
                     f"{gr.score:.4f} {'passed' if gr.passed else 'FAILED'}"
                     f" verdict={_verdict_text(gr)}"
-                    + (f" — {gr.explanation}" if gr.explanation else "")
+                    + (
+                        f" observed_by={','.join(level.value for level in gr.evidence_levels)}"
+                        if gr.evidence_levels
+                        else ""
+                    )
+                    + (
+                        f" moment={gr.judgment_moment.value}"
+                        if gr.judgment_moment is not None
+                        else ""
+                    )
+                    + weak
                 )
+                if gr.explanation:
+                    typer.echo(f"      {gr.explanation}")
 
 
 async def _get_run(storage, run_id: str):

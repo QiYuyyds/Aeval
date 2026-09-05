@@ -25,8 +25,18 @@ from __future__ import annotations
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
-from agent_eval.graders._evidence import evidence_report, observations_for
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    ObservedBy,
+    TrialResult,
+)
+from agent_eval.graders._evidence import (
+    evidence_report,
+    implementation_version_of,
+    observations_for,
+)
 from agent_eval.graders._verdicts import no_criteria_result
 from agent_eval.trace.observations import NormalizedTrace, is_missing
 
@@ -35,6 +45,8 @@ class StepLevelGrader:
     """步骤级评估 — expected_trace 按索引对照, 定位首个错误步骤"""
 
     name = "step_level"
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER)
+    implementation_version = "2"
 
     async def grade(
         self,
@@ -105,7 +117,9 @@ class StepLevelGrader:
                     actual[total:] if len(actual) > total else []
                 ),
                 "evidence": evidence_report(observations),
+                "grader_version": implementation_version_of(self),
             },
+            evidence_levels=[ObservedBy.RUNNER],
         )
 
 

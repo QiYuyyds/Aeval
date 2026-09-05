@@ -40,6 +40,10 @@ FIELD_SPAN_ROLE = "span.role"
 FIELD_ARTIFACT_TYPE = "artifact.type"
 FIELD_ARTIFACT_ID = "artifact.id"
 FIELD_ARTIFACT_CONTENT = "artifact.content"
+# 模型输入/输出正文: 采集开关必须知道该从 span 上摘掉哪些属性名, 而这些名字
+# 只能来自翻译表 (与工具入参同一套处理), 不能散落在裁剪逻辑里
+FIELD_MODEL_INPUT_CONTENT = "content.input"
+FIELD_MODEL_OUTPUT_CONTENT = "content.output"
 
 # span 角色
 ROLE_TOOL = "tool"
@@ -71,6 +75,8 @@ DEFAULT_FIELD_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     FIELD_AGENT_NAME: ("gen_ai.agent.name",),
     FIELD_AGENT_VERSION: ("gen_ai.agent.version",),
     FIELD_OPERATION_NAME: ("gen_ai.operation.name",),
+    FIELD_MODEL_INPUT_CONTENT: ("gen_ai.input.messages", "gen_ai.prompt"),
+    FIELD_MODEL_OUTPUT_CONTENT: ("gen_ai.output.messages", "gen_ai.completion"),
     **{name: () for name in _UNMAPPED_BY_DEFAULT},
 }
 
@@ -97,6 +103,61 @@ _ROLE_VALUE_ALIASES: dict[str, str] = {
     "llm": ROLE_LLM,
     ROLE_ARTIFACT: ROLE_ARTIFACT,
 }
+
+
+# ── 词汇预设 (公共埋点约定) ────────────────────────────────────────────────
+
+VOCABULARY_OTEL_GENAI = "otel-genai"
+VOCABULARY_OPENINFERENCE = "openinference"
+
+# 取号依据: openinference-semantic-conventions 0.1.30 的真实常量。
+# 这只是「条目抄自哪一版规范」的标签 —— 本表是纯数据, 该包不是运行时依赖。
+OPENINFERENCE_SPEC_VERSION = "openinference-0.1.30"
+
+# OpenInference 相对默认表的增量条目 (未列出的字段沿用默认)。
+#
+# total_tokens 在这里可以安全映射: OpenInference 把它挂在 LLM span 自己身上,
+# 该 span 本就因 prompt/completion 而判为 LLM, 不会像宿主那样把 run 级收尾
+# span 伪装成一次模型调用。
+#
+# 刻意不映 tool.parameters: 无法确认它是调用实参还是参数 schema。猜错的代价
+# 不是"读不到", 而是把一个错误的东西当成证据去判定, 比报缺失更坏。
+OPENINFERENCE_FIELD_OVERRIDES: dict[str, tuple[str, ...]] = {
+    FIELD_TOOL_NAME: ("tool.name",),
+    FIELD_INPUT_TOKENS: ("llm.token_count.prompt",),
+    FIELD_OUTPUT_TOKENS: ("llm.token_count.completion",),
+    FIELD_REASONING_TOKENS: ("llm.token_count.completion_details.reasoning",),
+    FIELD_CACHE_READ_TOKENS: ("llm.token_count.prompt_details.cache_read",),
+    FIELD_TOTAL_TOKENS: ("llm.token_count.total",),
+    FIELD_MODEL: ("llm.model_name",),
+    FIELD_SESSION_ID: ("session.id",),
+    FIELD_SPAN_ROLE: ("openinference.span.kind",),
+    FIELD_MODEL_INPUT_CONTENT: ("input.value", "llm.input_messages"),
+    FIELD_MODEL_OUTPUT_CONTENT: ("output.value", "llm.output_messages"),
+}
+
+
+def known_vocabularies() -> tuple[str, ...]:
+    """可选的公共约定预设 (供 CLI、能力清单与人发现)。"""
+    return (VOCABULARY_OTEL_GENAI, VOCABULARY_OPENINFERENCE)
+
+
+def _preset(vocabulary: str) -> tuple[dict[str, tuple[str, ...]], str]:
+    """解析词汇预设 → (候选条目表, 规范修订号)。"""
+    if vocabulary == VOCABULARY_OTEL_GENAI:
+        return dict(DEFAULT_FIELD_ATTRIBUTES), OTEL_GENAI_SPEC_VERSION
+
+    if vocabulary == VOCABULARY_OPENINFERENCE:
+        merged = dict(DEFAULT_FIELD_ATTRIBUTES)
+        for field_name, names in OPENINFERENCE_FIELD_OVERRIDES.items():
+            existing = tuple(n for n in merged.get(field_name, ()) if n not in names)
+            merged[field_name] = names + existing  # 新约定优先, 默认名兜底
+        return merged, OPENINFERENCE_SPEC_VERSION
+
+    # 静默退回默认表会产出一整套「看似正常、实则全空」的观测, 比直接失败更难查。
+    raise ValueError(
+        f"未知的 trace 词汇预设 {vocabulary!r}; 可选值: {', '.join(known_vocabularies())}"
+    )
 
 
 @dataclass(frozen=True)
@@ -161,9 +222,11 @@ class AttributeMapping:
 def default_mapping(
     extra_entries: Mapping[str, str | Sequence[str]] | None = None,
     version: str | None = None,
+    vocabulary: str = VOCABULARY_OTEL_GENAI,
 ) -> AttributeMapping:
-    """内置条目 (OTel GenAI) + 可选的宿主条目。"""
-    mapping = AttributeMapping()
+    """内置条目 (按 ``vocabulary`` 选公共约定预设) + 可选的宿主条目。"""
+    fields, spec_version = _preset(vocabulary)
+    mapping = AttributeMapping(fields=fields, spec_version=spec_version)
     if extra_entries:
         mapping = mapping.with_extra(extra_entries)
     if version is not None:
