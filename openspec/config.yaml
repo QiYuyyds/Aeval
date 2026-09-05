@@ -1,0 +1,76 @@
+schema: spec-driven
+
+context: |
+  项目：Aeval —— 由 OpenTelemetry trace 驱动的开源 Agent 评测框架（MIT，当前 v0.1.0）。
+  命名四件套，勿混用：仓库 Aeval / PyPI 发行包 aeval-framework / Python 模块 agent_eval / CLI 命令 eval-suite。
+  （PyPI 上的 agent-eval 属于无关项目 UK AISI agenteval。）
+
+  技术栈：
+  - Python 3.11+，pydantic v2 + PyYAML（suite 校验器写在 Pydantic 模型上），aiosqlite
+  - 可选依赖分组：api = FastAPI + sse-starlette + uvicorn；cli = typer + rich；dev = pytest(asyncio_mode=auto) + ruff(line-length 100, py311)
+  - Hatchling 构建；src/agent_eval 布局
+  - Dashboard：pnpm workspace，Next.js 16 App Router + React 19 + TypeScript + Tailwind 4 + zustand + TanStack Query + recharts
+
+  布局：
+  - packages/agent-eval/src/agent_eval/{core,graders,metrics,dataset,storage,trace,api,examples} + cli.py
+  - core/ 内：types.py 数据模型、contract.py 扩展协议、suite.py YAML 加载校验、metrics.py 统计、runner.py 编排器
+  - apps/dashboard（经 rewrites 把 /api/eval/* 代理到后端 EVAL_BACKEND_URL）、examples/{minimal,achat}、docs/（中文）
+
+  硬约束（提案与实现都不得违反）：
+  - 单向依赖：agent_eval 绝不 import app.*，由 tests/test_import_isolation.py 用 AST 扫描固化为禁令
+  - 定位是开发时工具（本地/CI 运行），自部署、无用户系统/认证/权限/多租户，不在生产常驻
+  - API 兼容承诺：同一大版本内 URL 与响应结构向后兼容；破坏性变更升 /v2 并保留并行期
+  - 两种部署形态：create_app() 由宿主决定前缀并可注入真实 runner；create_standalone_app() 固定 /v1 + X-Aeval-Version + /v1/meta 能力清单
+
+  关键行为语义（写 spec 时以此为准）：
+  - pass@k = k 次至少成功一次（能力）；pass^k = k 次全部成功（可靠性）；k > n 分别按 1-(1-p)^k 与 p^k 二项外推
+  - 一致性 = trial 间分数标准差 ≥ 0.2 记为不一致；过半任务 pass@1 ≥ 0.95 报告饱和
+  - pending（人工评分未回传）不计入通过率，回传后汇总重算
+  - 只有 TransientError 触发指数退避重试；超时记失败不重试；单 trial 失败不阻断其余
+  - verify_clean 检出环境泄漏 → 自动 restore + 告警，不判 trial 失败（成败只由评分决定）
+  - grader 按 dependencies 拓扑序执行，依赖未通过则跳过并给 0 分解释；同 run 内按 prompt-hash 缓存评分（可关）
+  - LLM 侧依赖统一经 LLMFn 回调 (system, user) → text 注入；缺配置返回带原因的 0 分结果而非崩溃
+  - 扩展协议（core/contract.py）：AgentRunner 必选，另有 TraceProvider / Grader / Storage / EnvironmentManager
+
+  能力词表（flat kebab-case，capability 路径与模块对齐，勿另造同义词）：
+  suite-format, extension-contracts, orchestration, statistics, graders, llm-metrics, dataset,
+  storage, trace-provider, rest-api, cli, dashboard
+  注：openspec/specs/ 目前为空，首个提案即锁定词表；后续提案复用已有路径，不新增域层级。
+
+  验证门：cd packages/agent-eval && pytest tests/ -q ；ruff check packages/agent-eval ；
+  前端 pnpm --filter eval-dashboard build。离线测试无需外部服务，缺 API 凭据时 LLM-judge 用例自动 skip。
+  测试策略：core 统计/suite 校验/graders/storage 纯单元（覆盖率目标 ≥90%）；MockRunner 端到端覆盖超时/重试/依赖跳过/泄漏矩阵；API 用 TestClient + 挂载回归。
+  提交约定：Conventional Commits，scope 取能力名，如 fix(cli): / feat(graders): / fix(release):。
+
+rules:
+  proposal:
+    - 标题之后第一行标注提案日期：`> 日期：YYYY-MM-DD`，取当天日期，并与 .openspec.yaml 中自动写入的 created 保持一致
+    - 用中文书写；代码标识符、YAML 键名、CLI 命令、HTTP 路径、文件保持英文
+    - Capabilities 只从 context 的能力词表中选取；确需新增能力名，先说明它覆盖什么、为何已有词表装不下
+    - "无 spec 级行为变更（纯重构/工具/文档）时，在该 change 的 .openspec.yaml 设 skip_specs: true，不要为通过校验编造 Requirement"
+    - 不要提议引入认证、权限、多租户、用户系统或生产常驻——超出框架定位，属于非目标
+  specs:
+    - 结构关键字必须逐字保持英文，否则解析不到：`## ADDED/MODIFIED/REMOVED/RENAMED Requirements`、`### Requirement:`、`#### Scenario:`（恰好 4 个 #）
+    - 每条 Requirement 正文保留英文 SHALL 或 MUST 原文（校验只认 \b(SHALL|MUST)\b，写中文「必须/应当」会报 WARNING）；描述性文字用中文
+    - 只写可观察行为、输入输出与错误条件；不写内部类名/函数名、库选型与分步实现（那些属于 design.md 或 tasks.md）
+    - "REMOVED 条目必须含 **Reason** 与 **Migration**；RENAMED 用 FROM:/TO: 格式"
+  design:
+    - 用中文书写；仅在跨模块、新增外部依赖、数据模型大改、安全/性能/迁移复杂度或存在歧义时才创建本文件
+    - Decisions 每条给出所选方案 + 明确不选的备选与理由
+    - 提出任何 agent_eval 侧方案前先确认不违反 import 隔离（不得 import app.*），并说明走哪个扩展协议
+    - Open Questions 只留真正可延后的未知项；会改变 specs、方案或任务拆分的疑问现在就跟用户确认，不要写进任务清单当作既定假设
+  tasks:
+    - 严格遵循模板 checkbox 格式 `- [ ] X.Y 描述`，未用该格式的条目不被 apply 阶段跟踪；相关任务用 `## 数字. 标题` 分组并按依赖排序
+    - 收尾一组验证任务：至少覆盖 ruff check packages/agent-eval 与 pytest tests/ -q，前端改动加 pnpm --filter eval-dashboard build
+    - 新增 grader 类型 / runner 协议 / storage 后端时，任务里包含测试与 docs/ 下对应中文文档章节
+
+operations:
+  apply:
+    guidance:
+      - 只在任务确实完成后勾选 tasks.md 中的条目；被 skip 的测试在总结中说明原因
+      - 改动 packages/agent-eval 后先跑验证门再报告完成，失败如实报告不要掩盖
+  archive:
+    guidance:
+      - 归档目录会自动加 YYYY-MM-DD- 前缀，取的是归档当天；若要把提案创建日留在归档名里，归档前先把 change 改成日期前缀名（已带前缀则保留、不叠加）
+      - 归档前确认 delta 已能干净合并，并检查新建主 spec 的 ## Purpose 无 TBD 残留占位
+      - 完成后用一段话总结：能力的增/改/废、验证门执行结果、遗留事项
