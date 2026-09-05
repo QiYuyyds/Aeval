@@ -25,12 +25,12 @@ export default function OverviewPage() {
         <StatCard
           label="平均分"
           value={loading ? "…" : fmtScore(stats!.avgScore)}
-          hint="已完成的 runs"
+          hint="已完成的 runs (无证据的 run 不计入均值)"
         />
         <StatCard
-          label="pass@3"
-          value={loading ? "…" : fmtPct(stats!.passAt3)}
-          hint="已完成 runs 均值"
+          label="pass@1"
+          value={loading ? "…" : fmtPct(stats!.passAt1)}
+          hint="实测有效率: 分母仅 valid trial, 不含 invalid/pending"
         />
       </div>
 

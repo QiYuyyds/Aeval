@@ -2,6 +2,7 @@
 
 import { RunStatusBadge } from "@/components/run-status-badge";
 import { StatCard } from "@/components/stat-card";
+import { VerdictBadge } from "@/components/verdict-badge";
 import {
   Badge,
   Card,
@@ -12,10 +13,18 @@ import {
   Td,
   Th,
 } from "@/components/ui/primitives";
-import { fmtDuration, fmtPct, fmtScore, fmtTime } from "@/lib/format";
+import { fmtCi, fmtDuration, fmtPct, fmtRate, fmtScore, fmtTime } from "@/lib/format";
 import { useRun, useRunTrials } from "@/lib/queries";
 import { subscribeRunEvents } from "@/lib/sse";
-import type { RunEvent, TrialFull, TrialLite } from "@/lib/types";
+import type {
+  PassKEstimate,
+  RunDetail,
+  RunEvent,
+  RunSummaryData,
+  TaskSummary,
+  TrialFull,
+  TrialLite,
+} from "@/lib/types";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -99,11 +108,40 @@ export default function RunReportPage() {
         </div>
       ) : null}
 
+      <CaliberBanner run={run} />
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label="pass@1" value={fmtScore(summary?.pass_at_k?.["1"])} />
-        <StatCard label="pass@3" value={fmtScore(summary?.pass_at_k?.["3"] ?? summary?.pass_at_k?.["1"])} />
-        <StatCard label="pass^3" value={fmtScore(summary?.pass_power_k?.["3"] ?? summary?.pass_power_k?.["1"])} />
-        <StatCard label="平均分" value={fmtScore(summary?.avg_score)} />
+        <StatCard
+          label="pass@1"
+          value={fmtRate(summary?.pass_at_k?.["1"], summary?.estimates?.["1"]?.extrapolated)}
+          hint={rateHint(summary?.estimates?.["1"], summary?.valid_trials)}
+        />
+        <StatCard
+          label={`pass^${maxK(summary)}`}
+          value={fmtRate(
+            summary?.pass_power_k?.[String(maxK(summary))],
+            summary?.power_estimates?.[String(maxK(summary))]?.extrapolated,
+          )}
+          hint={rateHint(
+            summary?.power_estimates?.[String(maxK(summary))],
+            summary?.valid_trials,
+          )}
+        />
+        <StatCard
+          label="平均分"
+          value={fmtScore(summary?.avg_score)}
+          hint={
+            summary?.score_distribution
+              ? `worst_of_n ${fmtScore(summary.score_distribution.worst_of_n)} · ` +
+                `95% ${fmtCi([summary.score_distribution.ci_low, summary.score_distribution.ci_high]) ?? "—"}`
+              : "有效 trial 的加权分均值"
+          }
+        />
+        <StatCard
+          label="分母 (valid/invalid/pending)"
+          value={denominatorText(summary)}
+          hint="通过率与平均分只在 valid 上计算; * = 外推值"
+        />
         <StatCard
           label="进度"
           value={running ? `${taskProgressPct(events, run.trials)}%` : `${taskIds.length}/${summary?.total_tasks ?? taskIds.length}`}
@@ -118,11 +156,66 @@ export default function RunReportPage() {
           <CardTitle>任务结果</CardTitle>
         </CardHeader>
         <CardContent>
-          <TaskResultsTable runId={run.run_id} taskIds={taskIds} trials={run.trials} />
+          <TaskResultsTable
+            runId={run.run_id}
+            taskIds={taskIds}
+            trials={run.trials}
+            summaries={summary?.task_summaries}
+            running={running}
+          />
         </CardContent>
       </Card>
 
       {!running ? <FailedTrialsCard runId={run.run_id} trialsData={trialsData?.trials} /> : null}
+    </div>
+  );
+}
+
+function maxK(summary: RunSummaryData | null | undefined): number {
+  const keys = Object.keys(summary?.pass_at_k ?? {}).map(Number).filter((n) => !Number.isNaN(n));
+  return keys.length ? Math.max(...keys) : 1;
+}
+
+function rateHint(
+  est: PassKEstimate | undefined,
+  validTrials: number | null | undefined,
+): string {
+  if (!est) return `分母: ${validTrials ?? "—"} 个 valid trial`;
+  const ci = fmtCi([est.p_lower_bound, est.p_upper_bound]);
+  const method =
+    est.method === "extrapolated"
+      ? "外推 (k 超出实测样本)"
+      : est.method === "insufficient_data"
+        ? "证据不足"
+        : "实测";
+  return `${method} n=${est.n} · ${est.successes} 成功${ci ? ` · 95% ${ci}` : ""}`;
+}
+
+function denominatorText(summary: RunSummaryData | null | undefined): string {
+  if (!summary) return "—";
+  return `${summary.valid_trials ?? "—"} / ${summary.invalid_trials ?? "—"} / ${summary.pending_trials ?? "—"}`;
+}
+
+/** 口径声明: 历史 run 不回算, 因此版本可能为 null, 必须显式说明其含义。 */
+function CaliberBanner({ run }: { run: RunDetail }) {
+  const summary = run.summary;
+  const total = summary?.total_trials ?? 0;
+  const invalid = summary?.invalid_trials ?? 0;
+  const mostlyInvalid = total > 0 && invalid / total > 0.5;
+  return (
+    <div
+      className={`rounded-lg border p-3 text-xs ${
+        mostlyInvalid ? "border-warning/40 bg-warning/10 text-warning" : "border-border text-muted-foreground"
+      }`}
+    >
+      <span className="mono">统计口径 v{run.statistics_version ?? "未知 (历史 run, 不回算)"}</span>
+      {" · pass@k 为有限样本无偏估计, 分母仅含 valid trial"}
+      {mostlyInvalid ? (
+        <div className="mt-1 font-medium">
+          本次 {invalid}/{total} 个 trial 判为评测无效 —— 通过率下降反映的是评测故障,
+          不是 agent 退化；请先检查 grader/judge 配置。
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -176,21 +269,27 @@ function TaskResultsTable({
   runId,
   taskIds,
   trials,
+  summaries,
+  running,
 }: {
   runId: string;
   taskIds: string[];
   trials: Record<string, TrialLite[]>;
+  summaries?: TaskSummary[];
+  running: boolean;
 }) {
   if (taskIds.length === 0) {
     return <div className="text-sm text-muted-foreground">尚无任务数据</div>;
   }
+  const byTask = new Map((summaries ?? []).map((ts) => [ts.task_id, ts]));
   return (
     <Table>
       <thead>
         <tr>
           <Th>Task</Th>
-          <Th>通过率</Th>
+          <Th>pass@1 (实测)</Th>
           <Th>平均分</Th>
+          <Th>分母 valid/invalid/待评</Th>
           <Th>状态</Th>
           <Th>Trials</Th>
         </tr>
@@ -198,25 +297,42 @@ function TaskResultsTable({
       <tbody>
         {taskIds.map((taskId) => {
           const taskTrials = trials[taskId] ?? [];
-          const passed = taskTrials.filter((t) => t.success).length;
-          const rate = taskTrials.length ? passed / taskTrials.length : 0;
-          const avg = taskTrials.length
-            ? taskTrials.reduce((acc, t) => acc + t.score, 0) / taskTrials.length
-            : 0;
-          const allDone = taskTrials.length > 0 && taskTrials.every((t) => t.success || t.error);
+          const ts = byTask.get(taskId);
+          const est = ts?.estimates?.["1"];
+          const invalidReasons = Object.values(ts?.invalid_reasons ?? {});
           return (
             <tr key={taskId}>
               <Td className="mono">{taskId}</Td>
-              <Td>{fmtPct(rate)}</Td>
-              <Td>{fmtScore(avg)}</Td>
-              <Td>
-                {!allDone ? (
-                  <Badge tone="primary">运行中</Badge>
-                ) : passed === taskTrials.length ? (
-                  <Badge tone="success">通过</Badge>
+              <Td
+                title={
+                  est
+                    ? `n=${est.n} · ${est.successes} 成功 · 95% ${
+                        fmtCi([est.p_lower_bound, est.p_upper_bound]) ?? "—"
+                      }`
+                    : undefined
+                }
+              >
+                {ts ? (
+                  fmtRate(ts.pass_at_k?.["1"], est?.extrapolated)
                 ) : (
-                  <Badge tone="danger">失败 {passed}/{taskTrials.length}</Badge>
+                  <span className="text-muted-foreground">
+                    {liveRate(taskTrials, running)}
+                  </span>
                 )}
+              </Td>
+              <Td>{fmtScore(ts?.avg_score)}</Td>
+              <Td className="mono text-xs">
+                {ts
+                  ? `${ts.valid_trials ?? "—"} / ${ts.invalid_trials ?? "—"} / ${ts.pending_trials.length}`
+                  : "—"}
+                {invalidReasons.length > 0 ? (
+                  <div className="text-warning" title={invalidReasons.join(", ")}>
+                    invalid: {[...new Set(invalidReasons)].join(", ")}
+                  </div>
+                ) : null}
+              </Td>
+              <Td>
+                <TaskVerdictLabel ts={ts} taskTrials={taskTrials} running={running} />
               </Td>
               <Td>
                 <div className="flex flex-wrap gap-1">
@@ -225,9 +341,27 @@ function TaskResultsTable({
                       key={t.trial_index}
                       href={`/runs/${runId}/trials/${taskId}/${t.trial_index}`}
                       className="inline-flex"
+                      title={t.invalid_reason ?? undefined}
                     >
-                      <Badge tone={t.success ? "success" : "danger"}>
-                        #{t.trial_index} {t.success ? "✓" : "✗"}
+                      <Badge
+                        tone={
+                          t.verdict === "invalid"
+                            ? "warning"
+                            : t.verdict === "pending"
+                              ? "primary"
+                              : t.success
+                                ? "success"
+                                : "danger"
+                        }
+                      >
+                        #{t.trial_index}{" "}
+                        {t.verdict === "invalid"
+                          ? "⚠"
+                          : t.verdict === "pending"
+                            ? "…"
+                            : t.success
+                              ? "✓"
+                              : "✗"}
                       </Badge>
                     </Link>
                   ))}
@@ -244,6 +378,55 @@ function TaskResultsTable({
   );
 }
 
+/** 运行中尚无汇总时的实时比例 (明确标注非最终口径) */
+function liveRate(taskTrials: TrialLite[], running: boolean): string {
+  const judged = taskTrials.filter((t) => t.verdict === "valid");
+  if (judged.length === 0) return "证据不足";
+  const rate = fmtPct(judged.filter((t) => t.success).length / judged.length);
+  return running ? `${rate} (实时)` : rate;
+}
+
+function TaskVerdictLabel({
+  ts,
+  taskTrials,
+  running,
+}: {
+  ts: TaskSummary | undefined;
+  taskTrials: TrialLite[];
+  running: boolean;
+}) {
+  if (!ts) {
+    return taskTrials.length === 0 || running ? (
+      <Badge tone="primary">运行中</Badge>
+    ) : (
+      <Badge tone="muted">无汇总</Badge>
+    );
+  }
+  const pending = ts.pending_trials.length;
+  const invalid = ts.invalid_trials ?? 0;
+  if (!ts.valid_trials) {
+    return (
+      <Badge tone={pending > 0 ? "primary" : "warning"} title="通过率分母为空, 不构成 agent 表现结论">
+        {pending > 0 ? `待人工评分 (${pending})` : "证据不足"}
+      </Badge>
+    );
+  }
+  if (invalid > 0) {
+    return (
+      <Badge tone="warning" title="部分 trial 为评测侧故障, 已从分母排除">
+        含 {invalid} 个无效 trial
+      </Badge>
+    );
+  }
+  return ts.failures.length === 0 ? (
+    <Badge tone="success">通过</Badge>
+  ) : (
+    <Badge tone="danger">
+      失败 {ts.failures.length}/{ts.valid_trials}
+    </Badge>
+  );
+}
+
 function FailedTrialsCard({
   runId,
   trialsData,
@@ -253,21 +436,34 @@ function FailedTrialsCard({
 }) {
   if (!trialsData) return null;
   const failed: Array<{ taskId: string; trial: TrialFull }> = [];
+  const unevaluated: Array<{ taskId: string; trial: TrialFull }> = [];
   for (const [taskId, trials] of Object.entries(trialsData)) {
     for (const t of trials) {
-      if (!t.success) failed.push({ taskId, trial: t });
+      // invalid / pending 是评测侧状态, 与 agent 失败分列, 不混进同一张清单
+      if (t.verdict !== "valid") unevaluated.push({ taskId, trial: t });
+      else if (!t.success) failed.push({ taskId, trial: t });
     }
   }
-  if (failed.length === 0) return null;
+  if (failed.length === 0 && unevaluated.length === 0) return null;
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>失败 Trial 明细 ({failed.length})</CardTitle>
+        <CardTitle>
+          失败 Trial ({failed.length})
+          {unevaluated.length > 0 ? (
+            <span className="ml-2 text-xs text-warning">
+              另有 {unevaluated.length} 个 trial 未构成 agent 结论
+            </span>
+          ) : null}
+        </CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {failed.map(({ taskId, trial }) => {
-          const failedGraders = trial.grader_results.filter((g) => !g.passed);
+        {[...failed, ...unevaluated].map(({ taskId, trial }) => {
+          const shownGraders =
+            trial.verdict === "valid"
+              ? trial.grader_results.filter((g) => !g.passed)
+              : trial.grader_results;
           return (
             <div key={`${taskId}-${trial.trial_index}`} className="rounded-lg border border-border p-3">
               <div className="flex items-center justify-between">
@@ -277,19 +473,28 @@ function FailedTrialsCard({
                 >
                   {taskId} #{trial.trial_index}
                 </Link>
-                <span className="text-xs text-muted-foreground">
-                  {fmtDuration(trial.duration_ms)}
+                <span className="flex items-center gap-2">
+                  <VerdictBadge verdict={trial.verdict} invalidReason={trial.invalid_reason} />
+                  <span className="text-xs text-muted-foreground">
+                    {fmtDuration(trial.duration_ms)}
+                  </span>
                 </span>
               </div>
               {trial.error ? (
                 <div className="mt-1 text-xs text-danger">error: {trial.error}</div>
               ) : null}
-              {failedGraders.length > 0 ? (
+              {shownGraders.length > 0 ? (
                 <ul className="mt-1 flex flex-col gap-1">
-                  {failedGraders.map((g) => (
+                  {shownGraders.map((g) => (
                     <li key={g.grader_name} className="text-xs text-muted-foreground">
-                      <span className="text-danger">{g.grader_name}</span> ({fmtScore(g.score)}):{" "}
-                      {g.explanation}
+                      <span
+                        className={
+                          g.verdict === "valid" && !g.passed ? "text-danger" : "text-warning"
+                        }
+                      >
+                        {g.grader_name}
+                      </span>{" "}
+                      ({fmtScore(g.score)}): {g.explanation}
                     </li>
                   ))}
                 </ul>

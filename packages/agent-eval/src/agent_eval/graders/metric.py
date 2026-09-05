@@ -7,9 +7,11 @@ Task grader configs with `type: metric` route through this grader (D1):
   runner falls back to this dispatcher for unregistered metric-type configs)
 
 The metric registry and LLM function are injected by EvalRunner
-(metrics_registry=..., llm_fn=...). Unregistered metric names score 0 with
-an explicit reason; missing LLM configuration surfaces a clear config error
-result instead of crashing the run.
+(metrics_registry=..., llm_fn=...). Evaluation-side failures — an unregistered
+metric name, a missing `metric_name`, a missing LLM configuration, or a metric
+that could not be computed — yield an ``invalid`` verdict with an explicit
+reason (never a 0 or half score), so they stay out of the pass-rate
+denominator and do not crash the run.
 """
 
 from __future__ import annotations
@@ -22,13 +24,20 @@ from agent_eval.core.types import (
     GraderConfig,
     GraderResult,
     GraderType,
+    InvalidReason,
     TrialResult,
+    TrialVerdict,
 )
-from agent_eval.metrics.base import Metric, MetricError
-from agent_eval.metrics.llm_judge import LLMFn, LLMJudgeError, LLMNotConfiguredError
-
-# 计算失败 (配置/解析/调用) 映射为 0 分结果, 不 crash run (D2)
-_CALC_ERRORS = (LLMNotConfiguredError, LLMJudgeError, MetricError)
+from agent_eval.graders._verdicts import no_criteria_result
+from agent_eval.metrics.base import (
+    METRIC_CALC_ERRORS as _CALC_ERRORS,
+)
+from agent_eval.metrics.base import (
+    Metric,
+    metric_failure_reason,
+    uncalculable_metric_result,
+)
+from agent_eval.metrics.llm_judge import LLMFn
 
 
 class MetricGrader:
@@ -56,21 +65,50 @@ class MetricGrader:
         metric_name = self._metric_name(config)
 
         if not metric_name:
-            return self._result(config, 0.0, False, "metric grader 缺少 config.metric_name")
+            return no_criteria_result(
+                config.name, GraderType.METRIC, "metric_name", details={"config": config.config}
+            )
 
         metric = self.metrics_registry.get(metric_name)
         if metric is None:
             return self._result(
-                config, 0.0, False, f"未知指标: {metric_name} (未在 metrics_registry 注册)"
+                config,
+                0.0,
+                False,
+                f"未知指标: {metric_name} (未在 metrics_registry 注册)",
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=InvalidReason.UNKNOWN_GRADER,
             )
 
         kwargs = self._measure_kwargs(config, trial)
         try:
             result = await metric.measure(**kwargs)
         except _CALC_ERRORS as e:
-            return self._result(config, 0.0, False, f"配置/计算错误: {e}")
+            return self._result(
+                config,
+                0.0,
+                False,
+                f"配置/计算错误: {e}",
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=metric_failure_reason(e),
+            )
         except Exception as e:  # noqa: BLE001 — 指标实现方错误同样不 crash run
-            return self._result(config, 0.0, False, f"指标计算异常: {e}")
+            return self._result(
+                config,
+                0.0,
+                False,
+                f"指标计算异常: {e}",
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=metric_failure_reason(e),
+            )
+
+        if result.details.get("error"):
+            return uncalculable_metric_result(
+                config.name,
+                str(result.details["error"]),
+                result.reason,
+                {**result.details, "metric": result.name},
+            )
 
         threshold = float(config.config.get("threshold", metric.threshold))
         return self._result(
@@ -131,6 +169,8 @@ class MetricGrader:
         passed: bool,
         explanation: str,
         details: dict[str, Any] | None = None,
+        verdict: TrialVerdict = TrialVerdict.VALID,
+        invalid_reason: InvalidReason | None = None,
     ) -> GraderResult:
         return GraderResult(
             grader_name=config.name,
@@ -139,4 +179,6 @@ class MetricGrader:
             passed=passed,
             explanation=explanation,
             details=details or {},
+            verdict=verdict,
+            invalid_reason=invalid_reason,
         )

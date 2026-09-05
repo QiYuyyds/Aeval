@@ -1,10 +1,10 @@
 # Minimal example
 
-最简单的 Aeval 接入示例：内置 Mock Agent + 两个任务的 toy suite，**完全离线可跑，零外部依赖**（除 `agent-eval` 本身）。
+最简单的 Aeval 接入示例：内置 Mock Agent + 两个任务的 toy suite，**完全离线可跑，零外部依赖**（除 `aeval-framework` 本身）。
 
 ## 运行
 
-方式一 — CLI（`pip install "agent-eval[cli]"` 后）：
+方式一 — CLI（`pip install "aeval-framework[cli]"` 后）：
 
 ```bash
 eval-suite run examples/minimal/suite.yaml
@@ -25,7 +25,7 @@ python examples/minimal/runner.py
 - `suite.yaml`：任务 / 评分器 / trial 数的声明式定义（详见 [YAML 格式](../../docs/yaml-format.md)）
 - `code_based` 确定性评分器（`contains` 检查）
 - `artifact_check` 产物检查评分器
-- 结果持久化（SQLite）与 pass@k / pass^k 汇总
+- 结果持久化（SQLite）与 pass@k / pass^k 汇总：附统计口径版本、`pass@1` 的 95% 区间与 `valid / invalid / pending` 分母
 
 ## 下一步
 

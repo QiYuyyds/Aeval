@@ -26,7 +26,15 @@ from collections.abc import Callable
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    InvalidReason,
+    TrialResult,
+    TrialVerdict,
+)
+from agent_eval.graders._verdicts import no_criteria_result
 
 # Type alias for LLM function: (system_prompt, user_message) -> str
 LLMFn = Callable[[str, str], str]
@@ -57,6 +65,11 @@ class ModelBasedGrader:
         dimensions = config.get("dimensions", ["quality"])
         threshold = config.get("threshold", 0.7)
 
+        if not dimensions:
+            return no_criteria_result(
+                self.name, GraderType.MODEL, "dimensions", details={"rubric": rubric}
+            )
+
         # Build judge prompt
         prompt = self._build_prompt(trial, rubric, dimensions)
 
@@ -65,22 +78,51 @@ class ModelBasedGrader:
         try:
             raw = llm_fn("You are an evaluation expert.", prompt)
         except Exception as e:
+            # judge 不可用是评测侧故障, 不得折成 agent 的 0 分
             return GraderResult(
                 grader_name=self.name,
                 grader_type=GraderType.MODEL,
                 score=0.0,
                 passed=False,
                 explanation=f"LLM call failed: {e}",
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=InvalidReason.JUDGE_UNAVAILABLE,
             )
 
         # Parse scores
         scores = self._parse_scores(raw, dimensions)
-        avg_score = sum(scores.values()) / len(scores) if scores else 0.0
+
+        if not scores:
+            return GraderResult(
+                grader_name=self.name,
+                grader_type=GraderType.MODEL,
+                score=0.0,
+                passed=False,
+                explanation=f"LLM Judge 输出无法解析出任何维度分数: {raw!r}",
+                details={"raw_response": raw, "dimensions": {}},
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=InvalidReason.VERDICT_UNPARSEABLE,
+            )
+
+        # 分母固定为配置的全集维度数: 缺席维度不得被「只平均已给分维度」充值
+        avg_score = sum(scores.values()) / len(dimensions)
+        missing = [d for d in dimensions if d not in scores]
+        if missing:
+            return GraderResult(
+                grader_name=self.name,
+                grader_type=GraderType.MODEL,
+                score=max(0.0, min(1.0, avg_score)),
+                passed=False,
+                explanation=f"LLM Judge 未返回全部维度 (缺席: {missing})",
+                details={"dimensions": scores, "missing": missing, "raw_response": raw},
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=InvalidReason.VERDICT_UNPARSEABLE,
+            )
 
         return GraderResult(
             grader_name=self.name,
             grader_type=GraderType.MODEL,
-            score=avg_score,
+            score=max(0.0, min(1.0, avg_score)),
             passed=avg_score >= threshold,
             explanation=f"LLM Judge scores: {scores}",
             details={"dimensions": scores, "raw_response": raw},
@@ -124,7 +166,11 @@ class ModelBasedGrader:
 ```"""
 
     def _parse_scores(self, raw: str, dimensions: list[str]) -> dict[str, float]:
-        """从 LLM 响应中解析分数"""
+        """从 LLM 响应中解析维度分数。
+
+        只返回 judge 实际给出的维度; 解析不出任何维度时返回空 dict,
+        由调用方判为 invalid (不再给各维度兜底 0.5 分)。
+        """
         scores: dict[str, float] = {}
 
         # 尝试提取 JSON
@@ -138,14 +184,9 @@ class ModelBasedGrader:
                 for dim in dimensions:
                     if dim in parsed:
                         with contextlib.suppress(ValueError, TypeError):
-                            scores[dim] = float(parsed[dim])
+                            scores[dim] = max(0.0, min(1.0, float(parsed[dim])))
         except json.JSONDecodeError:
             pass
-
-        # 如果解析失败，给所有维度默认分
-        if not scores:
-            for dim in dimensions:
-                scores[dim] = 0.5
 
         return scores
 

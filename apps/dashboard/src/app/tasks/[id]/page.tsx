@@ -31,10 +31,11 @@ export default function TaskDetailPage() {
 
   const task = taskResp.task;
   const history = historyResp?.history ?? [];
-  // ScoreTrend 期望时间升序
+  // ScoreTrend 期望时间升序; 无有效 trial 的 run 没有分数可画, 不入线 (不折成 0)
   const trendPoints: TrendPoint[] = [...history]
     .reverse()
-    .map((h) => ({ time: h.started_at, score: h.avg_score, runId: h.run_id }));
+    .filter((h) => h.avg_score != null)
+    .map((h) => ({ time: h.started_at, score: h.avg_score as number, runId: h.run_id }));
 
   return (
     <div className="flex flex-col gap-6">
@@ -130,7 +131,7 @@ export default function TaskDetailPage() {
                 <tr>
                   <Th>Run</Th>
                   <Th>时间</Th>
-                  <Th>通过</Th>
+                  <Th>通过 (仅 valid)</Th>
                   <Th>平均分</Th>
                   <Th>Grader 均分</Th>
                 </tr>
@@ -148,7 +149,10 @@ export default function TaskDetailPage() {
                     </Td>
                     <Td className="text-muted-foreground">{fmtTime(h.started_at)}</Td>
                     <Td>
-                      {h.trials_passed}/{h.trials_total}
+                      {h.trials_passed}/{h.valid_trials}
+                      <span className="ml-1 text-xs text-muted-foreground">
+                        (invalid {h.invalid_trials} · 待评 {h.pending_trials})
+                      </span>
                     </Td>
                     <Td>{fmtScore(h.avg_score)}</Td>
                     <Td>

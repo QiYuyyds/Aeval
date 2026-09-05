@@ -143,11 +143,13 @@ class SqliteStorage:
             return [RunResult(**json.loads(r["data"])) for r in rows]
 
     async def delete_run(self, run_id: str) -> bool:
-        """删除运行结果"""
+        """删除运行结果 (一并清除其派生的持久化内容)"""
         self._ensure_initialized()
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM runs WHERE run_id = ?", (run_id,)
+            cursor = await db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
+            # 人工评分请求带着被删 run 的证据内容, 不能留下孤儿行
+            await db.execute(
+                "DELETE FROM human_score_requests WHERE run_id = ?", (run_id,)
             )
             await db.commit()
             return cursor.rowcount > 0

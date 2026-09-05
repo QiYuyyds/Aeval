@@ -18,7 +18,7 @@ export function RunsTable({ runs, max = 20 }: { runs: RunListItem[]; max?: numbe
           <Th>Run</Th>
           <Th>Suite</Th>
           <Th>状态</Th>
-          <Th>pass@1</Th>
+          <Th>pass@1 (仅 valid)</Th>
           <Th>平均分</Th>
           <Th>任务数</Th>
           <Th>开始时间</Th>
@@ -37,7 +37,21 @@ export function RunsTable({ runs, max = 20 }: { runs: RunListItem[]; max?: numbe
             <Td>
               <RunStatusBadge status={r.status} />
             </Td>
-            <Td>{fmtScore(r.summary?.pass_at_k?.["1"])}</Td>
+            <Td>
+              {r.summary && r.summary.valid_trials === 0 ? (
+                "证据不足"
+              ) : (
+                fmtScore(r.summary?.pass_at_k?.["1"])
+              )}
+              {(r.summary?.invalid_trials ?? 0) > 0 ? (
+                <span
+                  className="ml-1 text-xs text-warning"
+                  title="评测侧故障导致的无效 trial, 已从分母排除"
+                >
+                  ⚠{r.summary?.invalid_trials}
+                </span>
+              ) : null}
+            </Td>
             <Td>{fmtScore(r.summary?.avg_score)}</Td>
             <Td>{r.task_count}</Td>
             <Td className="text-muted-foreground">{fmtTime(r.started_at)}</Td>

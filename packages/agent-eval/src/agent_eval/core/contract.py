@@ -26,6 +26,7 @@ from agent_eval.core.types import (
     RunResult,
     TrialResult,
 )
+from agent_eval.trace.observations import NormalizedTrace
 
 # ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,29 @@ class TransientError(Exception):
     """
 
 
+class AgentRunError(Exception):
+    """
+    被评测系统报错, 且接入方**显式声明了该错误的归类**。
+
+    框架不猜: 只抛通用异常的 trial 会被记为 ``unclassified_agent_error`` 并要求
+    人工判定, 既不折算为通过也不折算为不通过。接入方按下面的两个子类声明。
+    """
+
+    classification = "unclassified"
+
+
+class AgentDefect(AgentRunError):
+    """属 agent 自身缺陷 (崩溃/死循环/无法收敛) → trial 计为未通过。"""
+
+    classification = "agent_defect"
+
+
+class ExternalDependencyError(AgentRunError):
+    """属外部依赖不可达 (上游服务/凭据/网络) → trial 记为结论不可信, 不占分母。"""
+
+    classification = "external_dependency"
+
+
 # ─── Evaluation Context ───────────────────────────────────────────────────────
 
 
@@ -52,7 +76,8 @@ class EvalContext:
         run_id: 所属 run 的 ID
         task: 任务定义
         trial: 本次 trial 的结果 (评分过程中可能被填充)
-        spans: trace span 列表
+        spans: trace span 列表 (原始词汇, 仅供自述证据与自定义 grader 使用)
+        observations: spans 经翻译表归一化后的标准观测; 内置评分器只读这个
         shared_state: 同一 trial 内各 grader 间共享的可变状态
         grader_config: 当前评分调用的 grader 配置 (runner 每次调用前以
             replace() 注入; 供 name 与配置名不一致的分发型 grader 定位
@@ -63,6 +88,7 @@ class EvalContext:
     task: EvalTask
     trial: TrialResult
     spans: list[dict[str, Any]] = field(default_factory=list)
+    observations: NormalizedTrace | None = None
     shared_state: dict[str, Any] = field(default_factory=dict)
     grader_config: GraderConfig | None = None
 
@@ -105,7 +131,9 @@ class AgentRunner(Protocol):
                 - outcome: 环境最终状态
 
         Raises:
-            AgentRunError: Agent 执行失败 (超时/崩溃/被拦截)
+            TransientError: 瞬态故障 (框架按指数退避重试)
+            AgentDefect / ExternalDependencyError: 已声明归类的失败
+            asyncio.TimeoutError: 超过 per_trial_timeout
         """
         ...
 

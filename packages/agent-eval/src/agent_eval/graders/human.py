@@ -2,10 +2,11 @@
 Human grader — routes scoring to human experts with pending semantics.
 
 Semantics (design decision D5): ``grade()`` returns IMMEDIATELY with a pending
-result (score=0, passed=False, ``details.status="pending"``, confidence=0) and
-persists a score request to Storage. The run completes normally; pending
-trials are listed separately in the summary and excluded from pass rates.
-Scores come back later via ``POST /api/eval/runs/{run_id}/human-scores``.
+result (``verdict="pending"``, score=0, passed=False, ``details.status="pending"``,
+confidence=0) and persists a score request to Storage. The run completes
+normally; pending trials are listed separately in the summary and excluded from
+pass rates. Scores come back later via
+``POST /api/eval/runs/{run_id}/human-scores``.
 
 Config schema:
     {
@@ -20,7 +21,13 @@ import time
 from typing import Any
 
 from agent_eval.core.contract import EvalContext
-from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.core.types import (
+    EvalTask,
+    GraderResult,
+    GraderType,
+    TrialResult,
+    TrialVerdict,
+)
 
 
 class HumanGrader:
@@ -74,4 +81,5 @@ class HumanGrader:
                 "request": request,
             },
             confidence=0.0,
+            verdict=TrialVerdict.PENDING,
         )

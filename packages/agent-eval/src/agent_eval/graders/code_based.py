@@ -27,6 +27,7 @@ from typing import Any
 
 from agent_eval.core.contract import EvalContext
 from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.graders._verdicts import no_criteria_result
 
 
 class CodeBasedGrader:
@@ -46,13 +47,7 @@ class CodeBasedGrader:
         threshold = config.get("threshold", 1.0)
 
         if not checks:
-            return GraderResult(
-                grader_name=self.name,
-                grader_type=GraderType.CODE,
-                score=1.0,
-                passed=True,
-                explanation="No checks configured, auto-pass",
-            )
+            return no_criteria_result(self.name, GraderType.CODE, "checks")
 
         passed_count = 0
         details: list[dict[str, Any]] = []

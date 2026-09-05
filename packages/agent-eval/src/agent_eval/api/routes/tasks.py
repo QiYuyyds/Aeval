@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from agent_eval.core.metrics import split_trials_by_verdict
+from agent_eval.core.types import TrialVerdict
+
 router = APIRouter()
 
 
@@ -91,18 +94,24 @@ async def get_task_history(task_id: str):
         trials = run.trials.get(task_id)
         if not trials:
             continue
+        buckets = split_trials_by_verdict(trials)
+        valid = [t for _, t in buckets[TrialVerdict.VALID]]
         grader_scores: dict[str, list[float]] = {}
-        for trial in trials:
+        for trial in valid:
             for gr in trial.grader_results:
                 grader_scores.setdefault(gr.grader_name, []).append(gr.score)
         history.append({
             "run_id": run.run_id,
             "suite_name": run.suite_name,
             "started_at": run.started_at,
-            "trials_passed": sum(1 for t in trials if t.success),
+            "trials_passed": sum(1 for t in valid if t.success),
             "trials_total": len(trials),
+            "valid_trials": len(valid),
+            "invalid_trials": len(buckets[TrialVerdict.INVALID]),
+            "pending_trials": len(buckets[TrialVerdict.PENDING]),
             "avg_score": (
-                round(sum(t.avg_score() for t in trials) / len(trials), 4)
+                round(sum(t.avg_score() for t in valid) / len(valid), 4)
+                if valid else None
             ),
             "graders": {
                 name: round(sum(scores) / len(scores), 4)

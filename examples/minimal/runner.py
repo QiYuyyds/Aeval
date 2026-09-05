@@ -34,13 +34,28 @@ async def main() -> None:
         storage=storage,
     )
     run = await runner.run_suite(suite)
+    summary = run.summary
+
+    def pct(value: float | None) -> str:
+        return "insufficient_data" if value is None else f"{value:.1%}"
+
+    def num(value: float | None) -> str:
+        return "insufficient_data" if value is None else f"{value:.4f}"
+
+    est1 = summary.estimates[1]
+    ci = f" [95% CI {est1.p_lower_bound:.1%}..{est1.p_upper_bound:.1%}]" if est1 else ""
 
     print(f"\nRun {run.run_id}: {run.status}")
-    print(f"Pass@1: {run.summary.pass_at_k[1]:.1%}")
-    print(f"Pass^1: {run.summary.pass_power_k[1]:.1%}")
-    print(f"Avg score: {run.summary.avg_score:.4f}")
-    if run.summary.failures:
-        print("Failures:", ", ".join(run.summary.failures))
+    print(f"Statistics version: {run.statistics_version}")
+    print(f"Pass@1: {pct(summary.pass_at_k[1])}{ci}  ({est1.method if est1 else 'n/a'})")
+    print(f"Pass^1: {pct(summary.pass_power_k[1])}")
+    print(f"Avg score: {num(summary.avg_score)}  worst_of_n: {num(summary.score_distribution.worst_of_n)}")
+    print(
+        f"Denominator: valid={summary.valid_trials} "
+        f"invalid={summary.invalid_trials} pending={summary.pending_trials}"
+    )
+    if summary.failures:
+        print("Failures:", ", ".join(summary.failures))
     print(f"\nResults persisted to {DB_PATH} — inspect with:")
     print(f"  eval-suite show {run.run_id}")
     print("  eval-suite list runs")

@@ -9,18 +9,34 @@ from agent_eval.core.contract import (
     Storage,
     TraceProvider,
 )
-from agent_eval.core.metrics import aggregate_metrics, pass_at_k, pass_power_k
+from agent_eval.core.metrics import (
+    aggregate_metrics,
+    bootstrap_ci,
+    classify_trial,
+    pass_at_k,
+    pass_power_k,
+    percentile,
+    split_trials_by_verdict,
+    valid_trials,
+    wilson_interval,
+    worst_of_n,
+)
 from agent_eval.core.types import (
+    STATISTICS_VERSION,
     EvalSuite,
     EvalTask,
     GraderConfig,
     GraderResult,
     GraderType,
+    InvalidReason,
+    PassKEstimate,
     RunResult,
     RunSummary,
+    ScoreDistribution,
     ScoreStrategy,
     TaskSummary,
     TrialResult,
+    TrialVerdict,
 )
 
 __all__ = [
@@ -30,11 +46,16 @@ __all__ = [
     "GraderConfig",
     "GraderResult",
     "GraderType",
+    "InvalidReason",
+    "PassKEstimate",
     "RunResult",
     "RunSummary",
+    "ScoreDistribution",
     "ScoreStrategy",
     "TaskSummary",
     "TrialResult",
+    "TrialVerdict",
+    "STATISTICS_VERSION",
     # Contracts
     "AgentRunner",
     "EnvironmentManager",
@@ -43,6 +64,13 @@ __all__ = [
     "TraceProvider",
     # Metrics
     "aggregate_metrics",
+    "bootstrap_ci",
+    "classify_trial",
     "pass_at_k",
     "pass_power_k",
+    "percentile",
+    "split_trials_by_verdict",
+    "valid_trials",
+    "wilson_interval",
+    "worst_of_n",
 ]

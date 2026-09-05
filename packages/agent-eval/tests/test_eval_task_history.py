@@ -16,8 +16,10 @@ from agent_eval.core.types import (
     GraderConfig,
     GraderResult,
     GraderType,
+    InvalidReason,
     RunResult,
     TrialResult,
+    TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.storage.memory import MemoryStorage
@@ -58,6 +60,43 @@ def make_trial(index: int, scores: dict[str, float], success: bool = True) -> Tr
                 passed=score >= 0.7,
             )
             for name, score in scores.items()
+        ],
+    )
+
+
+def make_invalid_trial(index: int) -> TrialResult:
+    """判分器崩溃的 trial: 0 分但 verdict=invalid, 不得进入任何聚合分母。"""
+    return TrialResult(
+        trial_index=index,
+        success=False,
+        grader_results=[
+            GraderResult(
+                grader_name="code_based",
+                grader_type=GraderType.CODE,
+                score=0.0,
+                passed=False,
+                explanation="grader raised",
+                verdict=TrialVerdict.INVALID,
+                invalid_reason=InvalidReason.GRADER_ERROR,
+            )
+        ],
+    )
+
+
+def make_pending_trial(index: int) -> TrialResult:
+    """等待人工评分回传的 trial (pending 通道)。"""
+    return TrialResult(
+        trial_index=index,
+        success=False,
+        grader_results=[
+            GraderResult(
+                grader_name="human",
+                grader_type=GraderType.MODEL,
+                score=0.0,
+                passed=False,
+                explanation="awaiting human score",
+                verdict=TrialVerdict.PENDING,
+            )
         ],
     )
 
@@ -128,6 +167,42 @@ async def test_history_aggregates_multiple_runs(client):
     assert older["avg_score"] == pytest.approx(0.5)
     assert older["graders"]["code_based"] == pytest.approx(0.6)
     assert older["graders"]["model_based"] == pytest.approx(0.4)
+
+
+@pytest.mark.asyncio
+async def test_history_excludes_invalid_and_declares_denominator():
+    """旧口径: 1 通过 + 1 grader 崩溃 + 1 待评 → passed/total=1/3, avg=0.33。"""
+    runner = make_runner()
+    await runner.storage.save_suite(make_suite())
+    await runner.storage.save_run(make_run("run_mixed", BASE_MS + 5_000, {
+        "t1": [
+            make_trial(0, {"code_based": 1.0, "model_based": 1.0}),
+            make_invalid_trial(1),
+            make_pending_trial(2),
+        ],
+    }))
+    await runner.storage.save_run(make_run("run_blind", BASE_MS + 6_000, {
+        "t1": [make_invalid_trial(0)],
+    }))
+    app = create_eval_app(runner=runner)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        body = (await c.get("/tasks/t1/history")).json()
+
+    by_run = {h["run_id"]: h for h in body["history"]}
+    mixed = by_run["run_mixed"]
+    assert mixed["trials_total"] == 3
+    assert (mixed["valid_trials"], mixed["invalid_trials"], mixed["pending_trials"]) == (
+        1, 1, 1,
+    )
+    assert mixed["trials_passed"] == 1
+    assert mixed["avg_score"] == pytest.approx(1.0)
+    assert mixed["graders"] == {"code_based": 1.0, "model_based": 1.0}
+
+    # 全 invalid → 无证据, 不是 0 分
+    assert by_run["run_blind"]["valid_trials"] == 0
+    assert by_run["run_blind"]["avg_score"] is None
 
 
 @pytest.mark.asyncio

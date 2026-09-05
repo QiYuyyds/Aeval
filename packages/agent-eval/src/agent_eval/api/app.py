@@ -17,10 +17,21 @@ Usage:
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI
 
 from agent_eval.api.routes import datasets, graders, metrics, runs, suites, tasks
 from agent_eval.core.runner import EvalRunner
+from agent_eval.core.types import (
+    DEFAULT_BOOTSTRAP_ROUNDS,
+    DEFAULT_CONFIDENCE_LEVEL,
+    DEFAULT_INVALID_RATIO_LIMIT,
+    MIN_VALID_TRIALS_FOR_SATURATION,
+    STATISTICS_VERSION,
+)
+from agent_eval.graders import get_grader_catalog
+from agent_eval.trace.mapping import ATTRIBUTE_MAPPING_VERSION, OTEL_GENAI_SPEC_VERSION
 
 # Global runner reference (set by create_app)
 _runner: EvalRunner | None = None
@@ -39,6 +50,72 @@ def set_runner(runner: EvalRunner | None) -> None:
     """
     global _runner
     _runner = runner
+
+
+DISTRIBUTION_NAME = "aeval-framework"  # PyPI 发行包名 (Python 模块为 agent_eval)
+
+
+def package_version() -> str:
+    """包版本: 优先取已安装元数据, 源码直跑时回退模块常量。"""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _metadata_version
+
+    try:
+        return _metadata_version(DISTRIBUTION_NAME)
+    except PackageNotFoundError:
+        from agent_eval import __version__
+
+        return __version__
+
+
+def statistics_defaults() -> dict[str, Any]:
+    """统计口径版本与 D7 数值默认值 (经元信息接口公布, 供调用方判断可比性)。"""
+    return {
+        "version": STATISTICS_VERSION,
+        "confidence_level": DEFAULT_CONFIDENCE_LEVEL,
+        "bootstrap_rounds": DEFAULT_BOOTSTRAP_ROUNDS,
+        "min_valid_trials_for_saturation": MIN_VALID_TRIALS_FOR_SATURATION,
+        "gate_invalid_ratio_limit": DEFAULT_INVALID_RATIO_LIMIT,
+    }
+
+
+def meta_payload(
+    api_prefix: str = "",
+    endpoints: list[str] | None = None,
+    version: str | None = None,
+) -> dict[str, Any]:
+    """元信息响应体: 版本 + 统计口径 + 能力清单。
+
+    同一大版本内响应结构向后兼容, 但统计口径的数值语义可能变化 —— 口径版本
+    必须显式公布, 调用方才能判断两个 run 是否可直接比较。
+    """
+    return {
+        "name": "Aeval",
+        "package": DISTRIBUTION_NAME,
+        "version": version or package_version(),
+        "api_prefix": api_prefix,
+        "endpoints": endpoints or ["/suites", "/tasks", "/runs", "/compare", "/graders",
+                                   "/datasets", "/metrics", "/health"],
+        "statistics": statistics_defaults(),
+        "evidence": {
+            "spec_version": OTEL_GENAI_SPEC_VERSION,
+            "mapping_version": ATTRIBUTE_MAPPING_VERSION,
+            "tool_arguments_captured_by_default": False,
+        },
+        "capabilities": {
+            "graders": [g["name"] for g in get_grader_catalog()],
+            "storage": ["memory", "sqlite"],
+            "trace_providers": ["phoenix (optional, lazily imported)"],
+            "sse": True,
+            "datasets": True,
+            "metrics": True,
+            "validity_verdicts": True,
+            "confidence_intervals": True,
+            "normalized_trace_observations": True,
+            "termination_reasons": True,
+            "cost_axis": True,
+        },
+    }
 
 
 def create_app(runner: EvalRunner | None = None) -> FastAPI:
@@ -78,5 +155,10 @@ def create_app(runner: EvalRunner | None = None) -> FastAPI:
     async def health():
         # 动态读取全局 runner — host app 会在 startup 阶段注入真实 runner
         return {"status": "ok", "runner_configured": _get_runner() is not None}
+
+    @app.get("/meta")
+    async def meta():
+        """寄宿形态的元信息接口 (挂载前缀由宿主决定, 例如 /api/eval/meta)。"""
+        return meta_payload()
 
     return app

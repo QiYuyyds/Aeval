@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 
 from agent_eval.api.app import create_app
 from agent_eval.api.standalone import create_standalone_app, package_version
+from agent_eval.core.types import STATISTICS_VERSION
 
 
 def _client(runner=None):
@@ -32,12 +33,20 @@ class TestStandaloneAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["version"] == package_version()
-        assert data["package"] == "agent-eval"
+        assert data["package"] == "aeval-framework"
         assert data["api_prefix"] == "/v1"
         caps = data["capabilities"]
         assert "code_based" in caps["graders"]
         assert "sqlite" in caps["storage"]
         assert caps["sse"] is True
+        assert caps["validity_verdicts"] is True
+        # 统计口径声明 (任务 5.2): 版本 + D7 数值默认值
+        stats = data["statistics"]
+        assert stats["version"] == STATISTICS_VERSION
+        assert stats["confidence_level"] == 0.95
+        assert stats["bootstrap_rounds"] == 1000
+        assert stats["min_valid_trials_for_saturation"] == 5
+        assert stats["gate_invalid_ratio_limit"] == 0.2
 
     def test_run_routes_503_without_runner(self):
         with _client() as client:
@@ -64,12 +73,19 @@ class TestStandaloneAPI:
 
 class TestCreateAppUnchanged:
     def test_create_app_routes_stay_unprefixed(self):
-        """既有 create_app 零改动 — 寄宿挂载 (/api/eval) 的行为不变。"""
+        """寄宿挂载 (/api/eval) 的既有路由行为不变 (元信息为新增只读端点)。"""
         app = create_app()
         with TestClient(app) as client:
             assert client.get("/graders").status_code == 200
             assert client.get("/health").status_code == 200
             assert client.get("/v1/graders").status_code == 404
+
+    def test_hosted_mount_exposes_statistics_version(self):
+        """Scenario: 寄宿挂载形态 → 口径版本仍可经该形态的元信息接口取得"""
+        with TestClient(create_app()) as client:
+            meta = client.get("/meta").json()
+        assert meta["statistics"]["version"] == STATISTICS_VERSION
+        assert meta["api_prefix"] == ""
 
     def test_create_app_has_no_version_middleware(self):
         """X-Aeval-Version 头只属于独立部署, 不影响寄宿响应。"""
@@ -102,7 +118,14 @@ class TestPackageVersion:
                 {
                     "id": "t1",
                     "prompt": "hi",
-                    "graders": [{"type": "code", "name": "code_based"}],
+                    "graders": [{
+                        "type": "code",
+                        "name": "code_based",
+                        "config": {"checks": [
+                            {"type": "contains", "value": "Mock response",
+                             "target": "transcript"}
+                        ]},
+                    }],
                     "max_trials": 1,
                 }
             ],
@@ -121,6 +144,9 @@ class TestPackageVersion:
                 time.sleep(0.05)
             assert run["status"] == "completed"
             assert run["summary"]["pass_at_k"]["1"] == 1.0
+            assert run["statistics_version"] == STATISTICS_VERSION
+            assert run["summary"]["valid_trials"] == 1
+            assert run["summary"]["invalid_trials"] == 0
             # 版本头在数据响应上也存在
             assert client.get(f"/v1/runs/{run_id}").headers[
                 "X-Aeval-Version"

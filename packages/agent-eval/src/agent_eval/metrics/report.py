@@ -40,12 +40,12 @@ def render_run_report(run: RunResult, fmt: ReportFormat = "markdown") -> str:
 # ─── Markdown 渲染 ───────────────────────────────────────────────────────────
 
 
-def _score(value: float) -> str:
-    return f"{value:.4f}"
+def _score(value: float | None) -> str:
+    return "证据不足" if value is None else f"{value:.4f}"
 
 
-def _pct(value: float) -> str:
-    return f"{value:.1%}"
+def _pct(value: float | None) -> str:
+    return "证据不足" if value is None else f"{value:.1%}"
 
 
 def _render_batch_markdown(result: BatchEvaluationResult) -> str:
@@ -109,6 +109,12 @@ def _render_run_markdown(run: RunResult) -> str:
 
     lines.append(f"- 总任务 / 总 trial: {summary.total_tasks} / {summary.total_trials}")
     lines.append(
+        f"- 统计口径版本: {run.statistics_version or '未知'} | "
+        f"分母: valid={summary.valid_trials if summary.valid_trials is not None else '未知'} "
+        f"invalid={summary.invalid_trials if summary.invalid_trials is not None else '未知'} "
+        f"pending={summary.pending_trials if summary.pending_trials is not None else '未知'}"
+    )
+    lines.append(
         "- Pass@k: "
         + ", ".join(
             f"@{k}={_pct(v)}" for k, v in sorted(summary.pass_at_k.items())
@@ -125,25 +131,37 @@ def _render_run_markdown(run: RunResult) -> str:
 
     lines += ["## 任务分解", ""]
     if summary.task_summaries:
-        lines.append("| 任务 | 描述 | Trials | Pass@1 | Pass^1 | 平均分 | 失败 Trials |")
-        lines.append("|------|------|--------|--------|--------|--------|-------------|")
+        lines.append(
+            "| 任务 | 描述 | Trials | 有效/无效/待评 | Pass@1 | Pass^1 | 平均分 | 失败 Trials |"
+        )
+        lines.append(
+            "|------|------|--------|----------------|--------|--------|--------|-------------|"
+        )
         for ts in summary.task_summaries:
-            pass1 = _pct(ts.pass_at_k.get(1, 0.0))
-            pow1 = _pct(ts.pass_power_k.get(1, 0.0))
+            pass1 = _pct(ts.pass_at_k.get(1))
+            pow1 = _pct(ts.pass_power_k.get(1))
             failures = ", ".join(str(i) for i in ts.failures) if ts.failures else "—"
+            denominator = (
+                f"{ts.valid_trials if ts.valid_trials is not None else '—'}"
+                f"/{ts.invalid_trials if ts.invalid_trials is not None else '—'}"
+                f"/{len(ts.pending_trials)}"
+            )
             lines.append(
                 f"| {ts.task_id} | {ts.task_description} | {ts.total_trials} "
-                f"| {pass1} | {pow1} | {_score(ts.avg_score)} | {failures} |"
+                f"| {denominator} | {pass1} | {pow1} | {_score(ts.avg_score)} | {failures} |"
             )
     else:
         lines.append("（无任务汇总）")
 
     saturation = summary.saturation
     if saturation:
+        eligible = saturation.get("eligible_tasks") or []
+        insufficient = saturation.get("insufficient_sample_tasks") or []
         lines.append("")
         lines.append(
             f"饱和度: is_saturated={saturation.get('is_saturated', False)}, "
-            f"ratio={saturation.get('saturation_ratio', 0.0)}"
+            f"ratio={_pct(saturation.get('saturation_ratio'))} "
+            f"(分母: 合格任务 {len(eligible)}, 样本不足 {len(insufficient)})"
         )
     lines.append("")
     return "\n".join(lines)

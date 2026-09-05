@@ -2,11 +2,43 @@
 
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
+/** trial / grader 结论分类 (与 core.types.TrialVerdict 同步) */
+export type TrialVerdict = "valid" | "invalid" | "pending";
+
+/** 一个 k 值的通过率估计及其口径元数据 (core.types.PassKEstimate) */
+export interface PassKEstimate {
+  k: number;
+  n: number;
+  successes: number;
+  /** null = insufficient_data (分母为 0) */
+  value: number | null;
+  method: "measured" | "extrapolated" | "insufficient_data";
+  extrapolated: boolean;
+  p_point: number | null;
+  p_lower_bound: number | null;
+  p_upper_bound: number | null;
+  ci_level: number;
+}
+
+/** 连续分数分布摘要 (core.types.ScoreDistribution) */
+export interface ScoreDistribution {
+  n: number;
+  mean: number | null;
+  std_dev: number | null;
+  worst_of_n: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  ci_level: number;
+  method: "bootstrap" | "insufficient_data";
+}
+
 export interface GraderResultLite {
   grader_name: string;
   score: number;
   passed: boolean;
   explanation: string;
+  verdict: TrialVerdict;
+  invalid_reason: string | null;
 }
 
 export interface TrialLite {
@@ -16,6 +48,8 @@ export interface TrialLite {
   score: number;
   duration_ms: number;
   error: string | null;
+  verdict: TrialVerdict;
+  invalid_reason: string | null;
   grader_results: GraderResultLite[];
 }
 
@@ -23,22 +57,39 @@ export interface TaskSummary {
   task_id: string;
   task_description: string;
   total_trials: number;
-  pass_at_k: Record<string, number>;
-  pass_power_k: Record<string, number>;
-  avg_score: number;
+  /** {k: rate}; null = insufficient_data (无有效 trial 进入分母) */
+  pass_at_k: Record<string, number | null>;
+  pass_power_k: Record<string, number | null>;
+  estimates: Record<string, PassKEstimate>;
+  power_estimates: Record<string, PassKEstimate>;
+  /** null = 该 run 的统计口径未知 (历史行) */
+  valid_trials: number | null;
+  invalid_trials: number | null;
+  avg_score: number | null;
+  score_distribution: ScoreDistribution | null;
   avg_metrics: Record<string, number>;
   failures: number[];
+  invalid_trial_indices: number[];
+  /** trial 索引 (字符串) → 评测侧失败原因 */
+  invalid_reasons: Record<string, string>;
   pending_trials: number[];
-  consistent: boolean;
-  score_std_dev: number;
+  consistent: boolean | null;
+  score_std_dev: number | null;
+  sample_sufficient: boolean | null;
 }
 
 export interface RunSummaryData {
   total_tasks: number;
   total_trials: number;
-  pass_at_k: Record<string, number>;
-  pass_power_k: Record<string, number>;
-  avg_score: number;
+  pass_at_k: Record<string, number | null>;
+  pass_power_k: Record<string, number | null>;
+  estimates: Record<string, PassKEstimate>;
+  power_estimates: Record<string, PassKEstimate>;
+  valid_trials: number | null;
+  invalid_trials: number | null;
+  pending_trials: number | null;
+  avg_score: number | null;
+  score_distribution: ScoreDistribution | null;
   avg_metrics: Record<string, number>;
   task_summaries: TaskSummary[];
   failures: string[];
@@ -53,6 +104,7 @@ export interface RunListItem {
   completed_at: number | null;
   duration_ms: number | null;
   task_count: number;
+  statistics_version: string | null;
   summary: RunSummaryData | null;
 }
 
@@ -64,6 +116,7 @@ export interface RunDetail {
   completed_at: number | null;
   duration_ms: number | null;
   error: string | null;
+  statistics_version: string | null;
   trials: Record<string, TrialLite[]>;
   summary: RunSummaryData | null;
 }
@@ -117,6 +170,8 @@ export interface TrialFull {
   } & Record<string, unknown>;
   duration_ms: number;
   error: string | null;
+  verdict: TrialVerdict;
+  invalid_reason: string | null;
   grader_results: GraderResultFull[];
 }
 
@@ -159,16 +214,34 @@ export interface RunEvent {
   [key: string]: unknown;
 }
 
+/** 单行对比: 既有 a/b/delta 名称与语义不变, 值可为 null (证据不足) */
+export interface ComparisonRow {
+  a: number | null;
+  b: number | null;
+  delta: number | null;
+  a_ci: [number | null, number | null] | null;
+  b_ci: [number | null, number | null] | null;
+  /** null = 任一区间缺失, 无法判定重叠 */
+  intervals_overlap: boolean | null;
+  /** true 仅在两 run 口径一致且区间不重叠时成立 */
+  significant: boolean | null;
+  extrapolated: boolean;
+  comparable: boolean;
+}
+
 export interface ComparisonResponse {
   run_a: { run_id: string; suite_name: string; started_at: number };
   run_b: { run_id: string; suite_name: string; started_at: number };
   comparison: {
-    pass_at_k: Record<string, { a: number; b: number; delta: number }>;
-    pass_power_k: Record<string, { a: number; b: number; delta: number }>;
-    avg_score: { a: number; b: number; delta: number };
+    pass_at_k: Record<string, ComparisonRow>;
+    pass_power_k: Record<string, ComparisonRow>;
+    avg_score: ComparisonRow;
     regressions: TaskDelta[];
     improvements: TaskDelta[];
-    tasks: Record<string, { a: number; b: number; delta: number }>;
+    tasks: Record<string, ComparisonRow>;
+    statistics_version: { a: string | null; b: string | null };
+    comparable: boolean;
+    not_comparable_reason: string | null;
   };
 }
 
@@ -319,7 +392,11 @@ export interface TaskHistoryEntry {
   started_at: number;
   trials_passed: number;
   trials_total: number;
-  avg_score: number;
+  valid_trials: number;
+  invalid_trials: number;
+  pending_trials: number;
+  /** null = 无有效 trial 进入分母 (insufficient_data) */
+  avg_score: number | null;
   graders: Record<string, number>;
 }
 

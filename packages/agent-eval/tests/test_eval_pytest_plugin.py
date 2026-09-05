@@ -5,7 +5,9 @@ tests/conftest.py): 同步 fixture measure stub 化指标返回 MetricResult、
 异步经 .async_metric 直接 await、注册表 fixture、缺 LLM 配置报错可读。
 
 Part 2 (subprocess): --eval-suite 路径以 MockRunner suite 跑通 terminal
-summary 与阈值门禁 (退出码断言: pass@1 达标 → 0; 低于阈值 → 非 0)。
+summary 与阈值门禁。两条独立的失败条件都要断言: agent 表现 (修正后的实测
+pass@1 低于阈值 → 非 0) 与评测可信度 (invalid 占比超 --eval-invalid-limit
+或有效样本为 0 → 非 0, 且输出不得冒充 agent 表现结论); 两者都不成立 → 0。
 """
 
 import json
@@ -130,6 +132,26 @@ tasks:
     graders:
       - type: code
         name: code_based
+        config:
+          checks:
+            - type: contains
+              value: "Mock response"
+              target: transcript
+    max_trials: 2
+"""
+
+# 旧口径: 无 checks 的 code_based 自动 1.0 满分 → 门禁放行 (returncode 0)。
+# 新口径: 这是评测侧缺陷 → invalid trial 占比 1.0 > 上限 → 门禁拦下。
+SUITE_NO_CRITERIA = """\
+name: mock-gate-blind
+description: 门禁演示 — grader 未配置任何判据
+version: 1.0.0
+tasks:
+  - id: task_blind
+    prompt: "hello"
+    graders:
+      - type: code
+        name: code_based
     max_trials: 2
 """
 
@@ -193,7 +215,11 @@ class TestSuiteGate:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "AEVAL EVALUATION GATE" in proc.stdout
         assert "mock-gate-pass" in proc.stdout
-        assert "Pass@k: @1=1.0000" in proc.stdout
+        # 分母声明: 每条聚合值都带 valid/invalid/pending 计数
+        assert "(valid=2 invalid=0 pending=0)" in proc.stdout
+        assert "Pass@k: @1=1.0000, @2=1.0000" in proc.stdout
+        # 下界 0.34: 2/2 满分样本不得被报成"已饱和", 区间必须暴露小样本
+        assert "pass@1 95% CI: [0.3424, 1.0000] (denominator: 2 valid trials)" in proc.stdout
         assert "GATE PASSED: pass@1 1.0000 >= threshold 0.7000" in proc.stdout
 
     def test_gate_fails_below_threshold_with_nonzero_exit(self, tmp_path):
@@ -204,7 +230,45 @@ class TestSuiteGate:
 
         assert proc.returncode != 0, proc.stdout
         assert "AEVAL EVALUATION GATE" in proc.stdout
+        # agent 表现结论: trial 有效且确实失败, 与评测侧缺陷区分开
+        assert "(valid=1 invalid=0 pending=0)" in proc.stdout
         assert "GATE FAILED: pass@1 0.0000 < threshold 0.7000" in proc.stdout
+
+    def test_checkless_grader_used_to_pass_now_blocked(self, tmp_path):
+        """回归: 旧口径下这套件 pass@1=1.0000 → 放行; 新口径必须拦下。
+
+        grader 未配置任何判据 → 2 个 trial 全部 invalid (no_criteria_configured),
+        评测本身不可信, 不得给出 agent 表现结论。
+        """
+        suite = _setup_demo_dir(tmp_path, SUITE_NO_CRITERIA)
+        proc = _run_pytest(
+            tmp_path, "--eval-suite", str(suite), "--eval-threshold", "0.7", "."
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert "(valid=0 invalid=2 pending=0)" in proc.stdout
+        assert "Pass@k: @1=n/a, @2=n/a" in proc.stdout
+        assert "GATE FAILED (evaluation-side, not agent performance)" in proc.stdout
+        assert "invalid trial ratio 1.0000 > limit 0.20" in proc.stdout
+        assert "GATE PASSED" not in proc.stdout
+
+    def test_invalid_limit_option_overrides_the_ratio_gate(self, tmp_path):
+        """--eval-invalid-limit 1.0 → 占比不再触发评测侧失败, 退回证据不足判定。"""
+        suite = _setup_demo_dir(tmp_path, SUITE_NO_CRITERIA)
+        proc = _run_pytest(
+            tmp_path,
+            "--eval-suite",
+            str(suite),
+            "--eval-threshold",
+            "0.7",
+            "--eval-invalid-limit",
+            "1.0",
+            ".",
+        )
+
+        assert proc.returncode != 0, proc.stdout
+        assert "not agent performance" not in proc.stdout
+        assert "GATE FAILED (insufficient evidence)" in proc.stdout
 
     def test_gate_error_fails_loudly(self, tmp_path):
         # suite 文件不存在 → 门禁错误 → 退出码非 0 (静默放行是 CI 事故)

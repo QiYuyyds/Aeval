@@ -12,9 +12,9 @@ import {
   Td,
   Th,
 } from "@/components/ui/primitives";
-import { fmtDelta, fmtScore } from "@/lib/format";
+import { fmtCi, fmtDelta, fmtRate, fmtScore } from "@/lib/format";
 import { useCompare, useRuns } from "@/lib/queries";
-import type { ComparisonResponse, TaskDelta } from "@/lib/types";
+import type { ComparisonResponse, ComparisonRow, TaskDelta } from "@/lib/types";
 import { useState } from "react";
 
 export default function ComparePage() {
@@ -101,33 +101,38 @@ function RunSelect({
 
 function ComparisonResult({ data }: { data: ComparisonResponse }) {
   const { comparison } = data;
-  const globalRows: Array<{ label: string; a: number; b: number; delta: number }> = [
-    {
-      label: "平均分",
-      a: comparison.avg_score.a,
-      b: comparison.avg_score.b,
-      delta: comparison.avg_score.delta,
-    },
-    ...Object.entries(comparison.pass_at_k).map(([k, v]) => ({
-      label: `pass@${k}`,
-      a: v.a,
-      b: v.b,
-      delta: v.delta,
+  const kLabel = (key: string, prefix: string, at: boolean) =>
+    `${at ? "pass@" : "pass^"}${key.startsWith(prefix) ? key.slice(prefix.length) : key}`;
+
+  const globalRows: Array<{ label: string; row: ComparisonRow }> = [
+    { label: "平均分", row: comparison.avg_score },
+    ...Object.entries(comparison.pass_at_k).map(([key, row]) => ({
+      label: kLabel(key, "pass_at_", true),
+      row,
     })),
-    ...Object.entries(comparison.pass_power_k).map(([k, v]) => ({
-      label: `pass^${k}`,
-      a: v.a,
-      b: v.b,
-      delta: v.delta,
+    ...Object.entries(comparison.pass_power_k).map(([key, row]) => ({
+      label: kLabel(key, "pass_power_", false),
+      row,
     })),
   ];
 
   return (
     <div className="flex flex-col gap-4">
+      {!comparison.comparable ? (
+        <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
+          不可比: {comparison.not_comparable_reason ?? "统计口径版本不同"} (A=v
+          {comparison.statistics_version.a ?? "未知"} / B=v
+          {comparison.statistics_version.b ?? "未知"})。下方差值仅供参考，不构成退化或提升结论。
+        </div>
+      ) : null}
+
       <Card>
         <CardHeader>
           <CardTitle>
-            全局指标 <span className="mono text-xs text-muted-foreground">A → B (delta)</span>
+            全局指标{" "}
+            <span className="mono text-xs text-muted-foreground">
+              A → B (delta · 仅区间不重叠才判方向)
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -138,28 +143,12 @@ function ComparisonResult({ data }: { data: ComparisonResponse }) {
                 <Th>Run A</Th>
                 <Th>Run B</Th>
                 <Th>Delta</Th>
+                <Th>显著性</Th>
               </tr>
             </thead>
             <tbody>
-              {globalRows.map((row) => (
-                <tr key={row.label}>
-                  <Td>{row.label}</Td>
-                  <Td>{fmtScore(row.a)}</Td>
-                  <Td>{fmtScore(row.b)}</Td>
-                  <Td>
-                    <span
-                      className={
-                        row.delta > 0.1
-                          ? "text-success"
-                          : row.delta < -0.1
-                            ? "text-danger"
-                            : "text-muted-foreground"
-                      }
-                    >
-                      {fmtDelta(row.delta)}
-                    </span>
-                  </Td>
-                </tr>
+              {globalRows.map((r) => (
+                <DeltaRow key={r.label} label={r.label} row={r.row} />
               ))}
             </tbody>
           </Table>
@@ -191,34 +180,64 @@ function ComparisonResult({ data }: { data: ComparisonResponse }) {
                 <Th>A</Th>
                 <Th>B</Th>
                 <Th>Delta</Th>
+                <Th>显著性</Th>
               </tr>
             </thead>
             <tbody>
-              {Object.entries(comparison.tasks).map(([taskId, v]) => (
-                <tr key={taskId}>
-                  <Td className="mono">{taskId}</Td>
-                  <Td>{fmtScore(v.a)}</Td>
-                  <Td>{fmtScore(v.b)}</Td>
-                  <Td>
-                    <span
-                      className={
-                        v.delta > 0.1
-                          ? "text-success"
-                          : v.delta < -0.1
-                            ? "text-danger"
-                            : "text-muted-foreground"
-                      }
-                    >
-                      {fmtDelta(v.delta)}
-                    </span>
-                  </Td>
-                </tr>
+              {Object.entries(comparison.tasks).map(([taskId, row]) => (
+                <DeltaRow key={taskId} label={taskId} mono row={row} />
               ))}
             </tbody>
           </Table>
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** 单行对比: 方向性配色只在 significant 时出现 (D4) */
+function DeltaRow({
+  label,
+  row,
+  mono,
+}: {
+  label: string;
+  row: ComparisonRow;
+  mono?: boolean;
+}) {
+  const directional = row.significant === true && row.delta != null;
+  const tone = directional
+    ? row.delta! > 0
+      ? "text-success"
+      : "text-danger"
+    : "text-muted-foreground";
+  const ciA = fmtCi(row.a_ci);
+  const ciB = fmtCi(row.b_ci);
+  return (
+    <tr>
+      <Td className={mono ? "mono" : undefined}>{label}</Td>
+      <Td>
+        {fmtRate(row.a, row.extrapolated)}
+        {ciA ? <span className="ml-1 text-xs text-muted-foreground">{ciA}</span> : null}
+      </Td>
+      <Td>
+        {fmtRate(row.b, row.extrapolated)}
+        {ciB ? <span className="ml-1 text-xs text-muted-foreground">{ciB}</span> : null}
+      </Td>
+      <Td>
+        <span className={tone}>{fmtDelta(row.delta)}</span>
+      </Td>
+      <Td className="text-xs text-muted-foreground">
+        {!row.comparable
+          ? "口径不同, 不可比"
+          : row.significant === null
+            ? "区间缺失, 无法判定"
+            : row.significant
+              ? "显著 (区间不重叠)"
+              : "不显著 (95% 区间重叠)"}
+        {row.extrapolated ? " · 含外推值" : ""}
+      </Td>
+    </tr>
   );
 }
 

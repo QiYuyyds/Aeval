@@ -15,6 +15,7 @@ import pytest_asyncio
 
 from agent_eval.api.app import create_app as create_eval_app
 from agent_eval.core.runner import EvalRunner
+from agent_eval.core.types import STATISTICS_VERSION
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.storage.memory import MemoryStorage
 
@@ -40,6 +41,12 @@ async def client():
         yield c
 
 
+MOCK_TRANSCRIPT_CHECK = {
+    "type": "contains",
+    "value": "Mock response",
+    "target": "transcript",
+}
+
 SAMPLE_SUITE = {
     "name": "api-suite",
     "description": "suite created via API",
@@ -48,13 +55,17 @@ SAMPLE_SUITE = {
         {
             "id": "t1",
             "prompt": "hello",
-            "graders": [{"type": "code", "name": "code_based"}],
+            "graders": [
+                {"type": "code", "name": "code_based", "config": {"checks": [MOCK_TRANSCRIPT_CHECK]}}
+            ],
             "max_trials": 2,
         },
         {
             "id": "t2",
             "prompt": "world",
-            "graders": [{"type": "code", "name": "code_based"}],
+            "graders": [
+                {"type": "code", "name": "code_based", "config": {"checks": [MOCK_TRANSCRIPT_CHECK]}}
+            ],
         },
     ],
 }
@@ -145,6 +156,65 @@ class TestRunLifecycle:
         assert run["summary"]["pass_at_k"]["1"] == 1.0
         assert "saturation" in run["summary"]
 
+        # 新增字段 (任务 5.1): 分母计数 / per-k 估计方式 / 置信区间
+        assert run["statistics_version"] == STATISTICS_VERSION
+        summary = run["summary"]
+        assert summary["valid_trials"] == 5  # t1 2 trials + t2 3 trials
+        assert summary["invalid_trials"] == 0
+        assert summary["pending_trials"] == 0
+        est = summary["estimates"]["1"]
+        assert est["method"] == "measured"
+        assert est["extrapolated"] is False
+        assert est["n"] == 5
+        assert est["p_lower_bound"] <= 1.0 <= est["p_upper_bound"]
+        assert summary["score_distribution"]["worst_of_n"] is not None
+        ts = summary["task_summaries"][0]
+        assert {"valid_trials", "invalid_trials", "estimates"} <= set(ts)
+
+    async def test_legacy_client_reads_only_existing_fields(self, client):
+        """Scenario: 老客户端不受影响 (只读既有 pass_at_k 字段)"""
+        await client.post("/suites", json=SAMPLE_SUITE)
+        run_id = (await client.post("/runs", json={"suite_name": "api-suite"})).json()["run_id"]
+        run = await _poll_run(client, run_id)
+
+        # 既有契约: 名称与类型不变, 值按修正后的口径计算
+        rate = run["summary"]["pass_at_k"]["1"]
+        assert isinstance(rate, float)
+        assert isinstance(run["summary"]["avg_score"], float)
+        assert isinstance(run["trials"]["t1"][0]["score"], float)
+        assert isinstance(run["trials"]["t1"][0]["grader_results"][0]["explanation"], str)
+
+    async def test_grader_failure_reported_as_invalid_trials(self, client):
+        """Scenario: 新客户端读取有效性"""
+        suite = {
+            "name": "broken-suite",
+            "tasks": [
+                {
+                    "id": "t_boom",
+                    "prompt": "hello",
+                    "graders": [{"type": "code", "name": "not_registered"}],
+                    "max_trials": 2,
+                },
+            ],
+        }
+        await client.post("/suites", json=suite)
+        run_id = (await client.post("/runs", json={"suite_name": "broken-suite"})).json()["run_id"]
+        run = await _poll_run(client, run_id)
+
+        ts = run["summary"]["task_summaries"][0]
+        assert ts["invalid_trials"] == 2
+        assert ts["valid_trials"] == 0
+        assert ts["pass_at_k"]["1"] is None
+        assert run["summary"]["failures"] == []
+
+        trial = run["trials"]["t_boom"][0]
+        assert trial["verdict"] == "invalid"
+        assert trial["invalid_reason"] == "unknown_grader"
+        gr = trial["grader_results"][0]
+        assert gr["verdict"] == "invalid"
+        assert gr["invalid_reason"] == "unknown_grader"
+        assert "Unknown grader" in gr["explanation"]
+
     async def test_unknown_suite_404(self, client):
         resp = await client.post("/runs", json={"suite_name": "nope"})
         assert resp.status_code == 404
@@ -183,6 +253,40 @@ class TestRunLifecycle:
         assert comparison["avg_score"]["delta"] == 0.0
         assert comparison["regressions"] == []
         assert comparison["improvements"] == []
+        # 同口径 + 区间重叠 → 不给方向性结论
+        assert comparison["comparable"] is True
+        assert comparison["statistics_version"] == {
+            "a": STATISTICS_VERSION, "b": STATISTICS_VERSION,
+        }
+        row = comparison["pass_at_k"]["pass_at_1"]
+        assert row["intervals_overlap"] is True
+        assert row["significant"] is False
+        assert row["a_ci"][0] <= row["a"] <= row["a_ci"][1]
+
+    async def test_compare_across_statistics_versions_is_not_comparable(self):
+        """Scenario: 跨口径对比 → 显式标注不可比"""
+        runner = make_runner()
+        async with make_eval_client(runner) as client:
+            await client.post("/suites", json=SAMPLE_SUITE)
+            run_a = (await client.post("/runs", json={"suite_name": "api-suite"})).json()["run_id"]
+            run_b = (await client.post("/runs", json={"suite_name": "api-suite"})).json()["run_id"]
+            await _poll_run(client, run_a)
+            await _poll_run(client, run_b)
+
+            stored_b = await runner.storage.get_run(run_b)
+            stored_b.statistics_version = "1"  # 模拟旧口径产出的历史 run
+            await runner.storage.save_run(stored_b)
+
+            comparison = (
+                await client.post("/compare", json={"run_id_a": run_a, "run_id_b": run_b})
+            ).json()["comparison"]
+
+        assert comparison["comparable"] is False
+        assert comparison["statistics_version"] == {"a": STATISTICS_VERSION, "b": "1"}
+        assert "口径版本不同" in comparison["not_comparable_reason"]
+        assert comparison["regressions"] == []
+        assert comparison["improvements"] == []
+        assert comparison["pass_at_k"]["pass_at_1"]["significant"] is False
 
     async def test_compare_missing_run_404(self, client):
         resp = await client.post("/compare", json={"run_id_a": "x", "run_id_b": "y"})
@@ -249,7 +353,11 @@ class TestHumanScores:
                     "prompt": "hello",
                     "graders": [
                         {"type": "custom", "name": "human"},
-                        {"type": "code", "name": "code_based"},
+                        {
+                            "type": "code",
+                            "name": "code_based",
+                            "config": {"checks": [MOCK_TRANSCRIPT_CHECK]},
+                        },
                     ],
                     "max_trials": 1,
                 },
@@ -270,6 +378,11 @@ class TestHumanScores:
         )
         assert t1_summary["pending_trials"] == [0]
 
+        # 提交前: pending 不占分母 → 通过率为证据不足
+        assert t1_summary["valid_trials"] == 0
+        assert t1_summary["pending_trials"] == [0]
+        assert t1_summary["pass_at_k"]["1"] is None
+
         resp = await client.post(
             f"/runs/{run_id}/human-scores",
             json={"task_id": "t1", "trial_index": 0, "score": 1.0, "explanation": "good job"},
@@ -278,21 +391,25 @@ class TestHumanScores:
         data = resp.json()
         assert data["passed"] is True
         assert data["trial_success"] is True  # 混合策略加权分达到阈值
+        assert data["trial_verdict"] == "valid"
         assert data["summary"] is not None
 
-        # 汇总已重算: pending 清空, pass@1 = 1.0
+        # 汇总已重算: pending 清空, 该 trial 进入分母, pass@1 = 1.0
         updated = await client.get(f"/runs/{run_id}")
         t1_updated = next(
             ts for ts in updated.json()["summary"]["task_summaries"]
             if ts["task_id"] == "t1"
         )
         assert t1_updated["pending_trials"] == []
+        assert t1_updated["valid_trials"] == 1
         assert t1_updated["pass_at_k"]["1"] == 1.0
+        assert updated.json()["trials"]["t1"][0]["verdict"] == "valid"
 
         grader_results = updated.json()["trials"]["t1"][0]["grader_results"]
         human = next(gr for gr in grader_results if gr["grader_name"] == "human")
         assert human["score"] == 1.0
         assert human["passed"] is True
+        assert human["verdict"] == "valid"
 
     async def test_unknown_task_or_trial_404(self, client):
         run = await self._run_with_human_grader(client)

@@ -3,10 +3,11 @@ Step-level grader — compares the agent's tool-call sequence against an
 expected trace (design decision D6, first version: exact index-by-index
 comparison only).
 
-From the trace spans, extracts the sequence of ``tool.call`` steps (tool name
-from span attributes, falling back to the span name), aligns it with the
-task's ``expected_trace`` config by index, reports the first wrong step and
-scores ``correct_steps / total_steps``.
+The step sequence comes from the normalized tool-call observations, so a host
+that instruments under different attribute names needs only a mapping entry —
+never a change here. A call whose tool name could not be read keeps its slot in
+the sequence as ``null`` (index alignment is preserved, the step is judged
+incorrect, and the gap is visible in the result).
 
 Config schema:
     {
@@ -14,8 +15,9 @@ Config schema:
         "threshold": 0.7,  # optional, pass threshold
     }
 
-When ``expected_trace`` is not configured the grader auto-passes (nothing to
-compare against), mirroring code_based's behavior with no checks.
+When ``expected_trace`` is not configured there is nothing to compare against,
+so the grader reports an invalid ``no_criteria_configured`` verdict rather than
+an auto-pass: an unconfigured criterion is not evidence about the agent.
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ from typing import Any
 
 from agent_eval.core.contract import EvalContext
 from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.graders._evidence import evidence_report, observations_for
+from agent_eval.graders._verdicts import no_criteria_result
+from agent_eval.trace.observations import NormalizedTrace, is_missing
 
 
 class StepLevelGrader:
@@ -42,16 +47,16 @@ class StepLevelGrader:
         expected = config.get("expected_trace")
         threshold = config.get("threshold", 0.7)
 
-        actual = self._extract_steps(spans)
+        observations = observations_for(spans, context)
+        actual = _step_sequence(observations)
 
         if not expected:
-            return GraderResult(
-                grader_name=self.name,
-                grader_type=GraderType.CUSTOM,
-                score=1.0,
-                passed=True,
-                explanation="No expected_trace configured, auto-pass",
-                details={"actual_steps": actual},
+            return no_criteria_result(
+                self.name, GraderType.CUSTOM, "expected_trace",
+                details={
+                    "actual_steps": actual,
+                    "evidence": evidence_report(observations),
+                },
             )
 
         total = len(expected)
@@ -81,6 +86,10 @@ class StepLevelGrader:
                 f"expected '{expected[first_error]}', "
                 f"got '{actual[first_error] if first_error < len(actual) else None}'"
             )
+        if None in actual:
+            explanation += (
+                f"; {actual.count(None)} 步的工具名当时没读到 (null, 非 agent 少调用)"
+            )
 
         return GraderResult(
             grader_name=self.name,
@@ -95,22 +104,14 @@ class StepLevelGrader:
                 "extra_steps": (
                     actual[total:] if len(actual) > total else []
                 ),
+                "evidence": evidence_report(observations),
             },
         )
 
-    @staticmethod
-    def _extract_steps(spans: list[dict[str, Any]]) -> list[str]:
-        """从 spans 提取 tool.call 步骤序列 (工具名, 回退到 span 名称)"""
-        steps: list[str] = []
-        for span in spans:
-            name = span.get("name", "")
-            if "tool.call" not in name and "tool_call" not in name:
-                continue
-            attrs = span.get("attributes", {}) or {}
-            tool_name = (
-                attrs.get("agenthub.tool_name")
-                or attrs.get("tool_name")
-                or name
-            )
-            steps.append(str(tool_name))
-        return steps
+
+def _step_sequence(observations: NormalizedTrace) -> list[str | None]:
+    """归一化工具调用的名称序列 (名称缺失的位置保留为 None)。"""
+    return [
+        None if is_missing(call.tool_name) else str(call.tool_name)
+        for call in observations.tool_calls
+    ]

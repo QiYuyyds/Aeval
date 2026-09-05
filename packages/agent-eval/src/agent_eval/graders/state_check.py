@@ -25,6 +25,7 @@ from typing import Any
 
 from agent_eval.core.contract import EvalContext
 from agent_eval.core.types import EvalTask, GraderResult, GraderType, TrialResult
+from agent_eval.graders._verdicts import no_criteria_result
 
 
 class StateCheckGrader:
@@ -44,13 +45,7 @@ class StateCheckGrader:
         threshold = config.get("threshold", 1.0)
 
         if not expectations:
-            return GraderResult(
-                grader_name=self.name,
-                grader_type=GraderType.STATE,
-                score=1.0,
-                passed=True,
-                explanation="No expectations configured, auto-pass",
-            )
+            return no_criteria_result(self.name, GraderType.STATE, "expectations")
 
         passed_count = 0
         details: list[dict[str, Any]] = []

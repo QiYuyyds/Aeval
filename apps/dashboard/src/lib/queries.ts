@@ -121,8 +121,9 @@ export type OverviewStats = {
   suites: number;
   tasks: number;
   runs: number;
-  avgScore: number;
-  passAt3: number;
+  /** null = 没有任何已完成 run 给出有效证据 (insufficient_data) */
+  avgScore: number | null;
+  passAt1: number | null;
 };
 
 export function useOverviewStats(): {
@@ -143,16 +144,14 @@ export function useOverviewStats(): {
 
   const runItems = runs.data?.runs ?? [];
   const completed = runItems.filter((r) => r.summary != null);
-  const avgScore =
-    completed.length > 0
-      ? completed.reduce((acc, r) => acc + (r.summary?.avg_score ?? 0), 0) /
-        completed.length
-      : 0;
-  const passAt3 =
-    completed.length > 0
-      ? completed.reduce((acc, r) => acc + (r.summary?.pass_at_k?.["3"] ?? r.summary?.pass_at_k?.["1"] ?? 0), 0) /
-        completed.length
-      : 0;
+  // 分母只含有证据的 run: null (insufficient_data) 不得折成 0 计入均值
+  const hasEvidence = (v: number | null | undefined): v is number => v != null;
+  const mean = (values: number[]) =>
+    values.length ? values.reduce((acc, v) => acc + v, 0) / values.length : null;
+  const avgScore = mean(completed.map((r) => r.summary?.avg_score).filter(hasEvidence));
+  const passAt1 = mean(
+    completed.map((r) => r.summary?.pass_at_k?.["1"]).filter(hasEvidence),
+  );
 
   return {
     stats: {
@@ -160,7 +159,7 @@ export function useOverviewStats(): {
       tasks: tasks.data?.total ?? 0,
       runs: runItems.length,
       avgScore,
-      passAt3,
+      passAt1,
     },
     loading: false,
     runs: runItems,
@@ -172,9 +171,11 @@ export type TrendPoint = { time: number; score: number; runId: string };
 export function buildScoreTrend(runs: RunListItem[]): TrendPoint[] {
   return runs
     .filter((r) => r.summary != null && r.completed_at != null)
+    // 无证据的 run 不入线: 折成 0 分等于把"未评测"画成"表现归零"
+    .filter((r) => r.summary?.avg_score != null)
     .map((r) => ({
       time: r.completed_at as number,
-      score: Number((r.summary?.avg_score ?? 0).toFixed(4)),
+      score: Number(r.summary!.avg_score!.toFixed(4)),
       runId: r.run_id,
     }))
     .sort((a, b) => a.time - b.time)
@@ -183,7 +184,8 @@ export function buildScoreTrend(runs: RunListItem[]): TrendPoint[] {
 
 export function summarizeRunSummary(s: RunSummaryData | null): string {
   if (!s) return "—";
-  return `pass@1 ${(s.pass_at_k?.["1"] ?? 0).toFixed(2)} / avg ${s.avg_score.toFixed(3)}`;
+  const show = (v: number | null | undefined) => (v == null ? "证据不足" : v.toFixed(3));
+  return `pass@1 ${show(s.pass_at_k?.["1"])} / avg ${show(s.avg_score)}`;
 }
 
 // ── 数据集 (change ③ 端点封装) ───────────────────────────────────────────────

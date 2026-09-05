@@ -41,9 +41,9 @@ class AnswerRelevancyMetric(BaseLLMMetric):
         user_prompt = f"用户问题: {input}\n\nAgent 回答: {actual_output}"
         data = await self._llm_judge(self._SYSTEM_PROMPT, user_prompt)
 
-        score = self._score_of(data)
         if "score" not in data:
             raise MetricError(f"judge response missing 'score': {data!r}")
+        score = self._score_of(data)
 
         return MetricResult(
             name=self.name,

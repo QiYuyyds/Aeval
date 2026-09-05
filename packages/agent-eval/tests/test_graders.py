@@ -2,7 +2,13 @@
 
 import pytest
 
-from agent_eval.core.types import EvalTask, GraderConfig, GraderType
+from agent_eval.core.types import (
+    EvalTask,
+    GraderConfig,
+    GraderType,
+    InvalidReason,
+    TrialVerdict,
+)
 from agent_eval.graders import (
     DEFAULT_GRADERS,
     get_grader_catalog,
@@ -70,12 +76,8 @@ class TestHumanGrader:
 # ─── StepLevelGrader ──────────────────────────────────────────────────────────
 
 
-def _tool_span(name: str) -> dict:
-    return {"name": "tool.call", "attributes": {"agenthub.tool_name": name}}
-
-
 class TestStepLevelGrader:
-    async def test_all_steps_correct(self):
+    async def test_all_steps_correct(self, make_tool_span, make_context):
         grader = StepLevelGrader()
         task = make_task(
             graders=[GraderConfig(
@@ -84,14 +86,14 @@ class TestStepLevelGrader:
                 config={"expected_trace": ["fs_read", "fs_write"]},
             )],
         )
-        spans = [_tool_span("fs_read"), _tool_span("fs_write")]
-        result = await grader.grade(_trial(), spans, task)
+        spans = [make_tool_span("fs_read"), make_tool_span("fs_write")]
+        result = await grader.grade(_trial(), spans, task, make_context(task, spans))
 
         assert result.score == 1.0
         assert result.passed is True
         assert result.details["first_error_step"] is None
 
-    async def test_partial_mismatch_reports_first_error(self):
+    async def test_partial_mismatch_reports_first_error(self, make_tool_span, make_context):
         grader = StepLevelGrader()
         task = make_task(
             graders=[GraderConfig(
@@ -100,15 +102,15 @@ class TestStepLevelGrader:
                 config={"expected_trace": ["fs_read", "fs_write", "bash"]},
             )],
         )
-        spans = [_tool_span("fs_read"), _tool_span("grep"), _tool_span("bash")]
-        result = await grader.grade(_trial(), spans, task)
+        spans = [make_tool_span("fs_read"), make_tool_span("grep"), make_tool_span("bash")]
+        result = await grader.grade(_trial(), spans, task, make_context(task, spans))
 
         assert result.score == pytest.approx(2 / 3)
         assert result.details["first_error_step"] == 1
         assert "first error at step 1" in result.explanation
         assert "expected 'fs_write'" in result.explanation
 
-    async def test_missing_steps_count_as_wrong(self):
+    async def test_missing_steps_count_as_wrong(self, make_tool_span, make_context):
         grader = StepLevelGrader()
         task = make_task(
             graders=[GraderConfig(
@@ -117,26 +119,28 @@ class TestStepLevelGrader:
                 config={"expected_trace": ["fs_read", "fs_write", "bash"]},
             )],
         )
-        spans = [_tool_span("fs_read")]
-        result = await grader.grade(_trial(), spans, task)
+        spans = [make_tool_span("fs_read")]
+        result = await grader.grade(_trial(), spans, task, make_context(task, spans))
 
         assert result.score == pytest.approx(1 / 3)
         assert result.details["first_error_step"] == 1
         assert result.details["steps"][1]["actual"] is None
 
-    async def test_no_expected_trace_auto_passes(self):
+    async def test_no_expected_trace_is_invalid_not_auto_pass(self, make_tool_span, make_context):
+        """Scenario: 缺少期望轨迹 → invalid (specs/orchestration)"""
         grader = StepLevelGrader()
         task = make_task(
             graders=[GraderConfig(type=GraderType.CUSTOM, name="step_level")],
         )
-        spans = [_tool_span("fs_read")]
-        result = await grader.grade(_trial(), spans, task)
+        spans = [make_tool_span("fs_read")]
+        result = await grader.grade(_trial(), spans, task, make_context(task, spans))
 
-        assert result.score == 1.0
-        assert result.passed is True
-        assert "auto-pass" in result.explanation
+        assert result.verdict is TrialVerdict.INVALID
+        assert result.invalid_reason is InvalidReason.NO_CRITERIA_CONFIGURED
+        assert result.passed is False
+        assert result.details["actual_steps"] == ["fs_read"]
 
-    async def test_extra_steps_recorded(self):
+    async def test_extra_steps_recorded(self, make_tool_span, make_context):
         grader = StepLevelGrader()
         task = make_task(
             graders=[GraderConfig(
@@ -145,8 +149,8 @@ class TestStepLevelGrader:
                 config={"expected_trace": ["fs_read"]},
             )],
         )
-        spans = [_tool_span("fs_read"), _tool_span("extra_tool")]
-        result = await grader.grade(_trial(), spans, task)
+        spans = [make_tool_span("fs_read"), make_tool_span("extra_tool")]
+        result = await grader.grade(_trial(), spans, task, make_context(task, spans))
 
         assert result.score == 1.0
         assert result.details["extra_steps"] == ["extra_tool"]

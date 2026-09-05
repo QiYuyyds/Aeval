@@ -1,11 +1,17 @@
 """
-Mock AgentRunner for testing and demonstration.
+Mock AgentRunner / TraceProvider for testing and demonstration.
 
 Simulates an agent by returning predefined results, with per-task scripted
 behaviors for exercising the framework's failure paths.
 
+The mock trace provider writes span attributes **using whatever attribute
+names the supplied ``AttributeMapping`` declares**, so one logical trace can be
+emitted in any vocabulary. That is what breaks the self-fulfilling loop where a
+mock and the code under test agree on one private word: a test can hand both
+sides a host vocabulary and the framework must still read it.
+
 Usage:
-    from agent_eval.examples.mock_runner import MockAgentRunner
+    from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 
     # Random behavior (demo)
     runner = EvalRunner(agent_runner=MockAgentRunner())
@@ -19,6 +25,9 @@ Usage:
             "task_flaky": ["transient", "transient", "success"],
             "task_dead": ["failure"],
             "task_slow": ["timeout"],
+            "task_defect": ["defect"],
+            "task_infra": ["external"],
+            "task_crash": ["error"],
         },
     )
 """
@@ -30,8 +39,36 @@ import random
 import uuid
 from typing import Any
 
-from agent_eval.core.contract import TransientError
+from agent_eval.core.contract import (
+    AgentDefect,
+    ExternalDependencyError,
+    TransientError,
+)
 from agent_eval.core.types import EvalTask
+from agent_eval.trace.mapping import (
+    FIELD_AGENT_NAME,
+    FIELD_AGENT_VERSION,
+    FIELD_CACHE_READ_TOKENS,
+    FIELD_INPUT_TOKENS,
+    FIELD_MODEL,
+    FIELD_OUTPUT_TOKENS,
+    FIELD_REASONING_TOKENS,
+    FIELD_SESSION_ID,
+    FIELD_TOOL_ARGUMENTS,
+    FIELD_TOOL_NAME,
+    FIELD_TOOL_RESULT,
+    FIELD_TOOL_SUCCESS,
+    AttributeMapping,
+    default_mapping,
+)
+
+# 一次逻辑 trace 的全部内容 (与词汇无关): 归一化后两套表达必须一致
+MOCK_TURN = {
+    "input_tokens": 100,
+    "output_tokens": 50,
+    "reasoning_tokens": 20,
+    "cache_tokens": 30,
+}
 
 
 class MockAgentRunner:
@@ -39,7 +76,8 @@ class MockAgentRunner:
     模拟 AgentRunner。
 
     用于测试和演示框架功能，无需真实 Agent 系统。
-    支持脚本化场景: success / failure / transient / timeout。
+    支持脚本化场景: success / failure / transient / timeout / defect /
+    external / error / slow_steps / heavy_tokens。
     """
 
     def __init__(
@@ -53,8 +91,9 @@ class MockAgentRunner:
         Args:
             success_rate: 随机模式下的模拟成功率 (0.0-1.0)
             latency_range: 模拟延迟范围 (秒)
-            script: task_id → 行为序列 ("success"|"failure"|"transient"|"timeout"),
-                    逐次调用消耗, 耗尽后重复最后一项
+            script: task_id → 行为序列, 逐次调用消耗, 耗尽后重复最后一项:
+                "success" | "failure" | "transient" | "timeout" | "defect"
+                (agent 自身缺陷) | "external" (外部依赖不可达) | "error" (未声明类别的崩溃)
             timeout_duration: "timeout" 行为的挂起时长 (秒),
                               配合 EvalRunner(per_trial_timeout=...) 触发超时
         """
@@ -98,6 +137,14 @@ class MockAgentRunner:
             raise TransientError(
                 f"Mock transient failure for {task.id} (call {index + 1})"
             )
+        # 已声明归类的报错场景 (spec: agent 报错的归类不由框架猜测)
+        if behavior == "defect":
+            raise AgentDefect(f"Mock agent defect for {task.id}")
+        if behavior == "external":
+            raise ExternalDependencyError(f"Mock upstream outage for {task.id}")
+        # 未声明类别的报错: 框架不得猜它属于 agent 还是基建
+        if behavior == "error":
+            raise RuntimeError(f"Mock unclassified crash for {task.id}")
 
         # 生成 trace_id (编码 task id, 便于 MockTraceProvider 关联 spans)
         trace_id = f"trace_{task.id}_{uuid.uuid4().hex[:8]}"
@@ -140,38 +187,85 @@ class MockAgentRunner:
 
 
 class MockTraceProvider:
-    """模拟 TraceProvider
+    """模拟 TraceProvider。
 
-    可选按 task id 关联 span 数据: trace_id 形如 "trace_{task_id}_{suffix}"
-    时返回 spans_by_task[task_id] (若已配置), 否则返回默认 spans。
+    按给定翻译表写 span 属性名: 同一逻辑 trace 可用标准词汇或任意宿主词汇表达,
+    归一化结果必须一致。可选按 task id 关联 span 数据: trace_id 形如
+    "trace_{task_id}_{suffix}" 时返回 spans_by_task[task_id] (若已配置),
+    否则返回默认 spans。
     """
 
     def __init__(
         self,
         spans_by_task: dict[str, list[dict[str, Any]]] | None = None,
         default_spans: list[dict[str, Any]] | None = None,
+        mapping: AttributeMapping | None = None,
+        raises: bool = False,
     ):
+        """
+        Args:
+            spans_by_task: task_id → 预先构造的 spans (原样返回, 不经词汇生成)
+            default_spans: 覆盖默认 spans (原样返回)
+            mapping: 写 span 时使用的属性词汇表; None = 内置 OTel GenAI 条目
+            raises: 模拟取证后端不可用 (抛异常)
+        """
+        self.mapping = mapping or default_mapping()
+        self.raises = raises
         self.spans_by_task = spans_by_task or {}
         self.default_spans = default_spans or self._build_default_spans()
 
-    @staticmethod
-    def _build_default_spans() -> list[dict[str, Any]]:
+    def attribute_name(self, field: str) -> str | None:
+        """该字段在当前词汇下的属性名 (表里没有就没有, 不臆造)。"""
+        candidates = self.mapping.candidates(field)
+        return candidates[0] if candidates else None
+
+    def _attrs(self, entries: dict[str, Any]) -> dict[str, Any]:
+        """把 (标准字段 → 值) 翻成当前词汇下的属性字典 (无属性名的字段直接跳过)。"""
+        attributes: dict[str, Any] = {}
+        for field, value in entries.items():
+            name = self.attribute_name(field)
+            if name is not None:
+                attributes[name] = value
+        return attributes
+
+    def _build_default_spans(self) -> list[dict[str, Any]]:
+        """一个 turn + 一次工具调用的逻辑 trace, 按当前词汇表达。
+
+        入参与结果照样写出: 规范把它们列为 Opt-In, 采不采集由框架侧开关决定,
+        被评测方埋了就写。
+        """
+        turn_attrs = self._attrs(
+            {
+                FIELD_INPUT_TOKENS: MOCK_TURN["input_tokens"],
+                FIELD_OUTPUT_TOKENS: MOCK_TURN["output_tokens"],
+                FIELD_REASONING_TOKENS: MOCK_TURN["reasoning_tokens"],
+                FIELD_CACHE_READ_TOKENS: MOCK_TURN["cache_tokens"],
+                FIELD_MODEL: "mock-model-1",
+                FIELD_SESSION_ID: "sess_mock_1",
+                FIELD_AGENT_NAME: "mock-agent",
+                FIELD_AGENT_VERSION: "1.0.0",
+            }
+        )
+        tool_attrs = self._attrs(
+            {
+                FIELD_TOOL_NAME: "fs_write",
+                FIELD_TOOL_SUCCESS: True,
+                FIELD_TOOL_ARGUMENTS: {"path": "/tmp/out.py", "mode": "w"},
+                FIELD_TOOL_RESULT: {"bytes_written": 33},
+            }
+        )
         return [
             {
+                # span 名称只是给人看的: 框架按属性判定角色, 不看名称
                 "name": "agent.turn",
-                "attributes": {
-                    "agenthub.total_tokens": 150,
-                },
+                "attributes": turn_attrs,
                 "start_time": "2026-08-29T10:00:00Z",
                 "end_time": "2026-08-29T10:00:01Z",
                 "status": {"status_code": "OK"},
             },
             {
                 "name": "tool.call",
-                "attributes": {
-                    "agenthub.tool_name": "fs_write",
-                    "agenthub.success": True,
-                },
+                "attributes": tool_attrs,
                 "start_time": "2026-08-29T10:00:01Z",
                 "end_time": "2026-08-29T10:00:02Z",
                 "status": {"status_code": "OK"},
@@ -180,6 +274,8 @@ class MockTraceProvider:
 
     async def get_spans(self, trace_id: str) -> list[dict[str, Any]]:
         """返回模拟 span 数据 (优先按 task id 匹配)"""
+        if self.raises:
+            raise RuntimeError("Mock trace backend unreachable")
         if trace_id.startswith("trace_"):
             remainder = trace_id[len("trace_"):]
             for task_id, spans in self.spans_by_task.items():

@@ -1,8 +1,9 @@
 """eval-suite CLI tests (change extract-aeval-repo, task 5.4).
 
-CliRunner-based: run/validate exit-code semantics, list/show querying,
-compare output, unknown-runner handling. serve is covered as a TestClient
-smoke in test_standalone_api.py (uvicorn itself is not started here).
+CliRunner-based: run/validate exit-code semantics (0 = 放行, 1 = agent 表现
+未达标, 2 = 用法错误, 3 = 评测本身不可信即 invalid 超阈或证据不足), list/show
+querying, compare output, unknown-runner handling. serve is covered as a
+TestClient smoke in test_standalone_api.py (uvicorn itself is not started here).
 """
 
 import re
@@ -58,6 +59,19 @@ tasks:
             - type: contains
               value: "NEVER_PRESENT"
               target: transcript
+"""
+
+SUITE_NO_CRITERIA = """
+name: cli-no-criteria
+version: 1.0.0
+description: grader configured without any check
+tasks:
+  - id: t_blind
+    prompt: hello
+    max_trials: 1
+    graders:
+      - type: code
+        name: code_based
 """
 
 SUITE_DUPLICATE_IDS = """
@@ -126,7 +140,40 @@ class TestRun:
         )
         assert result.exit_code == 1, result.output
         assert "Failures:" in result.output
-        assert "- t_dead: 0/1 trials passed" in result.output
+        assert "- t_dead: 0/1 valid trials passed" in result.output
+
+    def test_checkless_grader_used_to_pass_now_blocks(self, tmp_path):
+        """回归: 无 checks 的 grader 旧口径自动满分放行 (exit 0)。
+
+        新口径下它是评测侧缺陷 -> invalid trial, 退出码 3, 且不给出放行结论。
+        """
+        db = tmp_path / "aeval.db"
+        result = runner.invoke(
+            app, ["run", _suite(tmp_path, SUITE_NO_CRITERIA), "--db", str(db)]
+        )
+        assert result.exit_code == 3, result.output
+        assert "NOT PASSABLE" in result.output
+        assert "not an agent performance result" in result.output
+        assert "insufficient_data" in result.output
+        assert "no_criteria_configured" in result.output
+        # 0.0 分数不得伪装成 "agent 失败" 的 1 退出码
+        assert "Failures:" not in result.output
+
+    def test_invalid_limit_option_relaxes_the_gate(self, tmp_path):
+        db = tmp_path / "aeval.db"
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                _suite(tmp_path, SUITE_NO_CRITERIA),
+                "--db",
+                str(db),
+                "--invalid-limit",
+                "1.0",
+            ],
+        )
+        assert result.exit_code == 3, result.output
+        assert "exceeds --invalid-limit" not in result.output
 
     def test_trials_override(self, tmp_path):
         db = tmp_path / "aeval.db"
@@ -250,6 +297,7 @@ class TestCompare:
         assert "METRIC" in result.output
         assert "Pass@" in result.output
         assert "Avg Score" in result.output
+        assert "Evidence boundary:" in result.output
         assert "Regressions:" in result.output
 
     def test_compare_missing_run_exits_nonzero(self, tmp_path):

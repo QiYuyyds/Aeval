@@ -11,6 +11,7 @@ import {
   Th,
 } from "@/components/ui/primitives";
 import { fmtDuration, fmtScore } from "@/lib/format";
+import { VerdictBadge } from "@/components/verdict-badge";
 import { useRunTrials } from "@/lib/queries";
 import type { TrialFull } from "@/lib/types";
 import { phoenixTraceUrl, useEvalSettings } from "@/store/settings";
@@ -57,6 +58,7 @@ export default function TrialDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <VerdictBadge verdict={trial.verdict} invalidReason={trial.invalid_reason} />
           <Badge tone={trial.success ? "success" : "danger"}>
             {trial.success ? "通过" : "失败"}
           </Badge>
@@ -95,6 +97,7 @@ export default function TrialDetailPage() {
                 <Th>类型</Th>
                 <Th>分数</Th>
                 <Th>通过</Th>
+                <Th>判定</Th>
                 <Th>说明</Th>
               </tr>
             </thead>
@@ -109,12 +112,15 @@ export default function TrialDetailPage() {
                       {g.passed ? "✓" : "✗"}
                     </Badge>
                   </Td>
+                  <Td>
+                    <VerdictBadge verdict={g.verdict} invalidReason={g.invalid_reason} />
+                  </Td>
                   <Td className="text-muted-foreground">{g.explanation}</Td>
                 </tr>
               ))}
               {trial.grader_results.length === 0 ? (
                 <tr>
-                  <Td colSpan={5} className="text-muted-foreground">
+                  <Td colSpan={6} className="text-muted-foreground">
                     无评分结果
                   </Td>
                 </tr>

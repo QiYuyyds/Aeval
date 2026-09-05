@@ -16,16 +16,10 @@ Usage:
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _metadata_version
-
 from fastapi import FastAPI
 
-from agent_eval.api.app import create_app
+from agent_eval.api.app import create_app, meta_payload, package_version
 from agent_eval.core.runner import EvalRunner
-from agent_eval.graders import get_grader_catalog
-
-PACKAGE_NAME = "agent-eval"
 
 # /v1 下暴露的路由组 (与 create_app 内的挂载一致; /health 为探活)
 CAPABILITY_ENDPOINTS = [
@@ -39,34 +33,21 @@ CAPABILITY_ENDPOINTS = [
     "/health",
 ]
 
-
-def package_version() -> str:
-    """包版本: 优先取已安装元数据, 未安装 (源码直跑) 时回退模块常量。"""
-    try:
-        return _metadata_version(PACKAGE_NAME)
-    except PackageNotFoundError:
-        from agent_eval import __version__
-
-        return __version__
+__all__ = [
+    "CAPABILITY_ENDPOINTS",
+    "create_standalone_app",
+    "package_version",
+    "meta_payload",
+]
 
 
 def _meta_payload() -> dict:
-    """GET /v1/meta 响应体: 版本 + 能力清单。"""
-    return {
-        "name": "Aeval",
-        "package": PACKAGE_NAME,
-        "version": package_version(),
-        "api_prefix": "/v1",
-        "endpoints": CAPABILITY_ENDPOINTS,
-        "capabilities": {
-            "graders": [g["name"] for g in get_grader_catalog()],
-            "storage": ["memory", "sqlite"],
-            "trace_providers": ["phoenix (optional, lazily imported)"],
-            "sse": True,
-            "datasets": True,
-            "metrics": True,
-        },
-    }
+    """GET /v1/meta 响应体: 版本 + 统计口径 + 能力清单 (与寄宿形态同源)。"""
+    return meta_payload(
+        api_prefix="/v1",
+        endpoints=CAPABILITY_ENDPOINTS,
+        version=package_version(),
+    )
 
 
 def create_standalone_app(runner: EvalRunner | None = None) -> FastAPI:

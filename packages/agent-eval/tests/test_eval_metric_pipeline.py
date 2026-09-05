@@ -13,7 +13,9 @@ from agent_eval.core.types import (
     EvalTask,
     GraderConfig,
     GraderType,
+    InvalidReason,
     ScoreStrategy,
+    TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.metrics.base import Metric, MetricResult
@@ -140,6 +142,8 @@ async def test_unknown_metric_name_scores_zero_with_reason():
     assert result.passed is False
     assert "未知指标" in result.explanation
     assert "no_such_metric" in result.explanation
+    assert result.verdict is TrialVerdict.INVALID
+    assert result.invalid_reason is InvalidReason.UNKNOWN_GRADER
 
 
 @pytest.mark.asyncio
@@ -149,12 +153,18 @@ async def test_missing_registry_returns_config_error_result():
         id="t1", prompt="q",
         graders=[metric_config(metric_name="stub_metric")],
     )
-    _, trial = await run_one(runner, task)
+    run_result, trial = await run_one(runner, task)
 
     result = trial.grader_results[0]
     assert result.score == 0.0
     assert result.passed is False
     assert "未知指标" in result.explanation
+    assert result.verdict is TrialVerdict.INVALID
+    assert result.invalid_reason is InvalidReason.UNKNOWN_GRADER
+    # 评测侧故障不占分母: 该 task 是证据不足而非「0% 通过」
+    ts = run_result.summary.task_summaries[0]
+    assert ts.valid_trials == 0 and ts.invalid_trials == ts.total_trials
+    assert ts.pass_at_k[1] is None
 
 
 @pytest.mark.asyncio
@@ -166,6 +176,47 @@ async def test_missing_metric_name_returns_config_error():
     result = trial.grader_results[0]
     assert result.score == 0.0
     assert "metric_name" in result.explanation
+    assert result.verdict is TrialVerdict.INVALID
+    assert result.invalid_reason is InvalidReason.NO_CRITERIA_CONFIGURED
+
+
+class UncalculableStubMetric(StubMetric):
+    """缺料即带内报错的指标 (faithfulness 无 context / recall 无 expected_output 同形)"""
+
+    name = "uncalculable_metric"
+
+    async def measure(self, input, actual_output, expected_output=None,
+                      context=None, retrieval_context=None) -> MetricResult:
+        return MetricResult(
+            name=self.name,
+            score=0.0,
+            reason="需要 context 才能评估忠实度",
+            details={"error": "missing_context"},
+            threshold=self.threshold,
+        )
+
+
+@pytest.mark.asyncio
+async def test_uncalculable_metric_is_invalid_not_a_scored_zero():
+    """旧路径: details.error 的 0.0 分被折进 agent 成绩; 新路径: invalid 不占分母。"""
+    runner = make_runner(metrics_registry={"unc": UncalculableStubMetric()})
+    task = EvalTask(
+        id="t1", prompt="q",
+        graders=[metric_config(metric_name="unc")],
+        max_trials=1,
+    )
+    run_result, trial = await run_one(runner, task)
+
+    result = trial.grader_results[0]
+    assert result.verdict is TrialVerdict.INVALID
+    assert result.invalid_reason is InvalidReason.NO_CRITERIA_CONFIGURED
+    assert "missing_context" in result.explanation
+    assert "需要 context" in result.explanation
+
+    ts = run_result.summary.task_summaries[0]
+    assert ts.valid_trials == 0 and ts.invalid_trials == 1
+    assert ts.pass_at_k[1] is None
+    assert ts.failures == []
 
 
 # ─── required / weight / 缓存语义 ────────────────────────────────────────────
@@ -185,13 +236,22 @@ async def test_required_metric_failure_fails_trial():
 
 @pytest.mark.asyncio
 async def test_metric_weight_counts_in_weighted_score():
-    # 0.2 的指标权重 1, 1.0 的 code grader (自动通过) 权重 1 → 加权 0.6 达标
+    # 0.2 的指标权重 1, 1.0 的 code grader 权重 1 → 加权 0.6 达标
     runner = make_runner(metrics_registry={"stub_metric": StubMetric(score=0.2)})
     task = EvalTask(
         id="t1", prompt="q",
         graders=[
             metric_config(metric_name="stub_metric", weight=1.0),
-            GraderConfig(type=GraderType.CODE, name="code_based", weight=1.0),
+            GraderConfig(
+                type=GraderType.CODE,
+                name="code_based",
+                weight=1.0,
+                config={
+                    "checks": [
+                        {"type": "contains", "value": "Mock response", "target": "transcript"}
+                    ]
+                },
+            ),
         ],
         score_strategy=ScoreStrategy.WEIGHTED,
         score_threshold=0.6,

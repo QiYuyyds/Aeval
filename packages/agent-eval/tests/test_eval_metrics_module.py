@@ -15,7 +15,7 @@ from agent_eval.metrics import (
     build_default_metrics_registry,
     extract_json_object,
 )
-from agent_eval.metrics.base import MetricGraderAdapter
+from agent_eval.metrics.base import MetricError, MetricGraderAdapter
 from agent_eval.metrics.llm_judge import judge_json
 
 
@@ -102,6 +102,12 @@ class TestAnswerRelevancy:
         stub = StubJudge(judge_json_response(0.5))
         metric = AnswerRelevancyMetric(llm_fn=stub, threshold=0.5)
         assert (await metric.measure("q", "a")).success is True
+
+    async def test_non_numeric_score_raises_instead_of_zero(self):
+        """score 字段存在但非数值 → 解析失败, 不静默折成 agent 的 0 分 (任务 1.5)"""
+        stub = StubJudge(judge_json_response("很高"))
+        with pytest.raises(MetricError, match="not a number"):
+            await AnswerRelevancyMetric(llm_fn=stub).measure("q", "a")
 
 
 class TestFaithfulness:

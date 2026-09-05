@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from agent_eval.api.events import run_event_bus
+from agent_eval.core.metrics import classify_trial, trial_invalid_reason
+from agent_eval.core.types import STATISTICS_VERSION, TrialVerdict
 
 router = APIRouter()
 
@@ -60,6 +62,8 @@ async def list_runs(suite_name: str | None = None, limit: int = 50):
                 "started_at": r.started_at,
                 "completed_at": r.completed_at,
                 "duration_ms": r.duration_ms,
+                "statistics_version": r.statistics_version,
+                "evidence": r.evidence.model_dump() if r.evidence else None,
                 "task_count": len(r.trials),
                 "summary": r.summary.model_dump() if r.summary else None,
             }
@@ -98,7 +102,12 @@ async def create_run(request: CreateRunRequest):
     from agent_eval.core.types import RunResult
 
     await runner.storage.save_run(
-        RunResult(run_id=run_id, suite_name=suite.name, status="pending")
+        RunResult(
+            run_id=run_id,
+            suite_name=suite.name,
+            status="pending",
+            statistics_version=STATISTICS_VERSION,
+        )
     )
 
     async def _run():
@@ -164,6 +173,8 @@ async def get_run(run_id: str):
         "completed_at": run.completed_at,
         "duration_ms": run.duration_ms,
         "error": run.error,
+        "statistics_version": run.statistics_version,
+        "evidence": run.evidence.model_dump() if run.evidence else None,
         "trials": {
             task_id: [
                 {
@@ -173,12 +184,24 @@ async def get_run(run_id: str):
                     "score": t.avg_score(),
                     "duration_ms": t.duration_ms,
                     "error": t.error,
+                    "verdict": t.verdict.value,
+                    "invalid_reason": t.invalid_reason.value if t.invalid_reason else None,
+                    "termination_reason": (
+                        t.termination_reason.value if t.termination_reason else None
+                    ),
+                    "metrics": t.metrics,
+                    "evidence_gaps": [gap.model_dump() for gap in t.evidence_gaps],
+                    "unrecognized_attributes": t.unrecognized_attributes,
                     "grader_results": [
                         {
                             "grader_name": gr.grader_name,
                             "score": gr.score,
                             "passed": gr.passed,
                             "explanation": gr.explanation,
+                            "verdict": gr.verdict.value,
+                            "invalid_reason": (
+                                gr.invalid_reason.value if gr.invalid_reason else None
+                            ),
                         }
                         for gr in t.grader_results
                     ],
@@ -203,6 +226,10 @@ async def delete_run(run_id: str):
     deleted = await runner.storage.delete_run(run_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    # 派生物一并清除: 内容寻址的评分缓存可能缓存了该 run 采集到的证据内容
+    runner.evict_run_cache(run_id)
+    _background_tasks.pop(run_id, None)
 
     return {"deleted": True}
 
@@ -410,11 +437,13 @@ async def submit_human_score(run_id: str, request: HumanScoreRequest):
             "threshold", threshold
         )
 
-    # 更新已存的 GraderResult
+    # 更新已存的 GraderResult (评分回传 → 离开 pending 通道)
     grader_result.score = request.score
     grader_result.passed = request.score >= threshold
     grader_result.explanation = request.explanation or "人工评分"
     grader_result.confidence = 1.0
+    grader_result.verdict = TrialVerdict.VALID
+    grader_result.invalid_reason = None
     grader_result.details = {
         **grader_result.details,
         "status": "scored",
@@ -425,6 +454,10 @@ async def submit_human_score(run_id: str, request: HumanScoreRequest):
     # 重算 trial 成功状态与 run 汇总 (含该 task 汇总)
     if task is not None:
         trial.success = runner._compute_trial_success(task, trial.grader_results)
+    trial.verdict = classify_trial(trial)
+    trial.invalid_reason = trial_invalid_reason(trial)
+    if run.statistics_version is None:
+        run.statistics_version = STATISTICS_VERSION
     run.summary = runner._compute_summary(run, suite) if suite is not None else run.summary
     await runner.storage.save_run(run)
 
@@ -436,6 +469,7 @@ async def submit_human_score(run_id: str, request: HumanScoreRequest):
         "score": grader_result.score,
         "passed": grader_result.passed,
         "trial_success": trial.success,
+        "trial_verdict": trial.verdict.value,
         "summary": run.summary.model_dump() if run.summary else None,
     }
 
@@ -489,85 +523,207 @@ async def compare_runs(request: CompareRequest):
 
 
 def _build_comparison(run_a, run_b) -> dict[str, Any]:
-    """构建两次运行的对比"""
+    """构建两次运行的对比 (口径版本不同则标注不可比; 区间重叠则不判方向)。
+
+    既有字段 (`a`/`b`/`delta`/`regressions`/`improvements`/`tasks`) 的名称与类型
+    保持不变; 分母为 0 时 `a`/`b`/`delta` 为 null 而非 0.0。
+    """
     summary_a = run_a.summary
     summary_b = run_b.summary
 
-    # 全局指标对比
-    all_k_values = set()
-    if summary_a.pass_at_k:
-        all_k_values.update(summary_a.pass_at_k.keys())
-    if summary_b.pass_at_k:
-        all_k_values.update(summary_b.pass_at_k.keys())
+    version_a = getattr(run_a, "statistics_version", None)
+    version_b = getattr(run_b, "statistics_version", None)
+    evidence_a = getattr(run_a, "evidence", None)
+    evidence_b = getattr(run_b, "evidence", None)
+    same_caliber = version_a is not None and version_a == version_b
+    same_boundary, boundary_reason = _compare_evidence_boundaries(evidence_a, evidence_b)
+    comparable = same_caliber and same_boundary
+
+    all_k_values: set[int] = set()
+    for summary in (summary_a, summary_b):
+        for k in (summary.pass_at_k or {}):
+            all_k_values.add(int(k))
+
+    def _entry(
+        a_val: float | None,
+        b_val: float | None,
+        a_ci: tuple[float | None, float | None] | None,
+        b_ci: tuple[float | None, float | None] | None,
+        extrapolated: bool,
+    ) -> dict[str, Any]:
+        overlapping = _intervals_overlap(a_ci, b_ci)
+        return {
+            "a": a_val,
+            "b": b_val,
+            "delta": _delta(a_val, b_val),
+            "a_ci": _ci_list(a_ci),
+            "b_ci": _ci_list(b_ci),
+            "intervals_overlap": overlapping,
+            "significant": (
+                None if overlapping is None else (comparable and not overlapping)
+            ),
+            "extrapolated": extrapolated,
+            "comparable": comparable,
+        }
+
+    def _k_map(summary, field: str) -> dict:
+        raw = getattr(summary, field, None) or {}
+        return {int(k): v for k, v in raw.items()}
 
     pass_at_k_comparison = {}
-    for k in sorted(all_k_values):
-        a_val = summary_a.pass_at_k.get(k, 0.0)
-        b_val = summary_b.pass_at_k.get(k, 0.0)
-        pass_at_k_comparison[f"pass_at_{k}"] = {
-            "a": a_val,
-            "b": b_val,
-            "delta": round(b_val - a_val, 4),
-        }
-
     pass_power_k_comparison = {}
     for k in sorted(all_k_values):
-        a_val = summary_a.pass_power_k.get(k, 0.0)
-        b_val = summary_b.pass_power_k.get(k, 0.0)
-        pass_power_k_comparison[f"pass_power_{k}"] = {
-            "a": a_val,
-            "b": b_val,
-            "delta": round(b_val - a_val, 4),
-        }
+        est_a = _k_map(summary_a, "estimates").get(k)
+        est_b = _k_map(summary_b, "estimates").get(k)
+        pass_at_k_comparison[f"pass_at_{k}"] = _entry(
+            est_a.value if est_a else None,
+            est_b.value if est_b else None,
+            _est_ci(est_a),
+            _est_ci(est_b),
+            bool(est_a and est_a.extrapolated) or bool(est_b and est_b.extrapolated),
+        )
 
-    # 逐 task 对比
+        pow_a = _k_map(summary_a, "power_estimates").get(k)
+        pow_b = _k_map(summary_b, "power_estimates").get(k)
+        pass_power_k_comparison[f"pass_power_{k}"] = _entry(
+            pow_a.value if pow_a else None,
+            pow_b.value if pow_b else None,
+            _est_ci(pow_a),
+            _est_ci(pow_b),
+            bool(pow_a and pow_a.extrapolated) or bool(pow_b and pow_b.extrapolated),
+        )
+
+    dist_a = getattr(summary_a, "score_distribution", None)
+    dist_b = getattr(summary_b, "score_distribution", None)
+    avg_entry = _entry(
+        summary_a.avg_score,
+        summary_b.avg_score,
+        _dist_ci(dist_a),
+        _dist_ci(dist_b),
+        False,
+    )
+
+    # 逐 task 对比: 只有区间不重叠才判为退化/提升 (D4)
     task_a_map = {ts.task_id: ts for ts in summary_a.task_summaries}
     task_b_map = {ts.task_id: ts for ts in summary_b.task_summaries}
 
     all_task_ids = set(task_a_map.keys()) | set(task_b_map.keys())
-    regressions = []
-    improvements = []
-    task_comparisons = {}
+    regressions: list[dict[str, Any]] = []
+    improvements: list[dict[str, Any]] = []
+    task_comparisons: dict[str, Any] = {}
 
     for task_id in sorted(all_task_ids):
         ts_a = task_a_map.get(task_id)
         ts_b = task_b_map.get(task_id)
+        if not (ts_a and ts_b):
+            continue
 
-        if ts_a and ts_b:
-            a_score = ts_a.avg_score
-            b_score = ts_b.avg_score
-            delta = round(b_score - a_score, 4)
+        a_score = ts_a.avg_score
+        b_score = ts_b.avg_score
+        delta = _delta(a_score, b_score)
+        overlapping = _intervals_overlap(
+            _dist_ci(ts_a.score_distribution), _dist_ci(ts_b.score_distribution)
+        )
+        significant = (
+            comparable and overlapping is False and delta is not None and abs(delta) > 0.1
+        )
+        task_comparisons[task_id] = {
+            "a": a_score,
+            "b": b_score,
+            "delta": delta,
+            "a_ci": _ci_list(_dist_ci(ts_a.score_distribution)),
+            "b_ci": _ci_list(_dist_ci(ts_b.score_distribution)),
+            "intervals_overlap": overlapping,
+            "significant": (None if overlapping is None else (
+                comparable and overlapping is False
+            )),
+            "comparable": comparable,
+        }
 
-            task_comparisons[task_id] = {
-                "a": a_score,
-                "b": b_score,
-                "delta": delta,
-            }
-
-            if delta < -0.1:
-                regressions.append({
-                    "task_id": task_id,
-                    "a": a_score,
-                    "b": b_score,
-                    "delta": delta,
-                })
-            elif delta > 0.1:
-                improvements.append({
-                    "task_id": task_id,
-                    "a": a_score,
-                    "b": b_score,
-                    "delta": delta,
-                })
+        if not significant:
+            continue
+        row = {"task_id": task_id, "a": a_score, "b": b_score, "delta": delta}
+        if delta < 0:
+            regressions.append(row)
+        else:
+            improvements.append(row)
 
     return {
         "pass_at_k": pass_at_k_comparison,
         "pass_power_k": pass_power_k_comparison,
-        "avg_score": {
-            "a": summary_a.avg_score,
-            "b": summary_b.avg_score,
-            "delta": round(summary_b.avg_score - summary_a.avg_score, 4),
-        },
+        "avg_score": avg_entry,
         "regressions": regressions,
         "improvements": improvements,
         "tasks": task_comparisons,
+        "statistics_version": {"a": version_a, "b": version_b},
+        "evidence_boundary": {
+            "a": evidence_a.model_dump() if evidence_a else None,
+            "b": evidence_b.model_dump() if evidence_b else None,
+        },
+        "comparable": comparable,
+        "not_comparable_reason": _not_comparable_reason(
+            comparable, same_caliber, version_a, version_b, boundary_reason
+        ),
     }
+
+
+def _compare_evidence_boundaries(
+    evidence_a: Any, evidence_b: Any
+) -> tuple[bool, str | None]:
+    """两个 run 的证据边界是否一致 (缺记录即无法判定可比)。"""
+    if evidence_a is None and evidence_b is None:
+        return False, "两个 run 均未记录证据采集边界 (历史 run), 无法判定可比性"
+    if evidence_a is None or evidence_b is None:
+        missing = "a" if evidence_a is None else "b"
+        return False, f"run_{missing} 未记录证据采集边界 (历史 run), 无法判定可比性"
+    return evidence_a.compare_with(evidence_b)
+
+
+def _not_comparable_reason(
+    comparable: bool,
+    same_caliber: bool,
+    version_a: str | None,
+    version_b: str | None,
+    boundary_reason: str | None,
+) -> str | None:
+    if comparable:
+        return None
+    if not same_caliber:
+        return (
+            "两个 run 的统计口径版本不同"
+            if version_a is not None and version_b is not None
+            else "至少一个 run 未记录统计口径版本 (历史 run), 无法判定可比性"
+        )
+    return boundary_reason or "两个 run 的证据采集边界不同"
+
+
+def _delta(a: float | None, b: float | None) -> float | None:
+    if a is None or b is None:
+        return None
+    return round(b - a, 4)
+
+
+def _est_ci(est) -> tuple[float | None, float | None] | None:
+    if est is None or est.p_lower_bound is None or est.p_upper_bound is None:
+        return None
+    return (est.p_lower_bound, est.p_upper_bound)
+
+
+def _dist_ci(dist) -> tuple[float | None, float | None] | None:
+    if dist is None or dist.ci_low is None or dist.ci_high is None:
+        return None
+    return (dist.ci_low, dist.ci_high)
+
+
+def _ci_list(ci: tuple[float | None, float | None] | None) -> list[float] | None:
+    return [ci[0], ci[1]] if ci else None
+
+
+def _intervals_overlap(
+    a: tuple[float | None, float | None] | None,
+    b: tuple[float | None, float | None] | None,
+) -> bool | None:
+    """两侧区间是否重叠 (D4)。任一侧无区间 → None (无法判定)。"""
+    if a is None or b is None:
+        return None
+    return not (a[1] < b[0] or b[1] < a[0])

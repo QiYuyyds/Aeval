@@ -12,7 +12,26 @@ export function fmtScore(v: number | null | undefined): string {
   return v.toFixed(3);
 }
 
-export function fmtDelta(v: number): string {
+/** 通过率: null = 证据不足 (分母无 valid trial), 外推值以 * 标注不冒充实测 */
+export function fmtRate(v: number | null | undefined, extrapolated = false): string {
+  if (v == null) return "证据不足";
+  return `${(v * 100).toFixed(1)}%${extrapolated ? "*" : ""}`;
+}
+
+/** 置信区间文本; 两端皆缺时返回 null (不猜测区间) */
+export function fmtCi(
+  ci: readonly (number | null)[] | null | undefined,
+  digits = 3,
+): string | null {
+  if (!ci) return null;
+  const [lo, hi] = ci;
+  if (lo == null && hi == null) return null;
+  const show = (v: number | null) => (v == null ? "—" : v.toFixed(digits));
+  return `[${show(lo)}, ${show(hi)}]`;
+}
+
+export function fmtDelta(v: number | null | undefined): string {
+  if (v == null) return "证据不足";
   const sign = v > 0 ? "+" : "";
   return `${sign}${v.toFixed(3)}`;
 }

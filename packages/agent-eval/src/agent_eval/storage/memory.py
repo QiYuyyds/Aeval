@@ -50,9 +50,12 @@ class MemoryStorage:
         return runs[:limit]
 
     async def delete_run(self, run_id: str) -> bool:
-        """删除运行结果"""
+        """删除运行结果 (一并清除其派生的持久化内容)"""
         if run_id in self._runs:
             del self._runs[run_id]
+            self._human_score_requests = [
+                req for req in self._human_score_requests if req.get("run_id") != run_id
+            ]
             return True
         return False
 

@@ -11,6 +11,9 @@ from agent_eval.core.types import (
     GraderConfig,
     GraderResult,
     GraderType,
+    InvalidReason,
+    TerminationReason,
+    TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.storage.memory import MemoryStorage
@@ -28,9 +31,33 @@ def code_grader(name: str = "code_based", **config) -> GraderConfig:
     return GraderConfig(type=GraderType.CODE, name=name, config=config)
 
 
-def auto_pass_grader(name: str) -> GraderConfig:
-    """code_based 无 checks 时自动通过"""
-    return GraderConfig(type=GraderType.CODE, name=name)
+def passing_grader(name: str = "code_based", weight: float = 1.0) -> GraderConfig:
+    """带真实判据的 code_based grader。
+
+    (无 checks 的 code_based 现在记 invalid 而不再自动满分, 见任务 3.4)
+    """
+    return GraderConfig(
+        type=GraderType.CODE,
+        name=name,
+        weight=weight,
+        config={
+            "checks": [
+                {"type": "contains", "value": "Mock response", "target": "transcript"}
+            ]
+        },
+    )
+
+
+def outcome_grader(name: str = "code_based", weight: float = 1.0) -> GraderConfig:
+    """判据依赖 agent 产物的 grader (MockAgentRunner 仅在 success 时产出 artifacts)。"""
+    return GraderConfig(
+        type=GraderType.CODE,
+        name=name,
+        weight=weight,
+        config={
+            "checks": [{"type": "contains", "value": "art_", "target": "outcome"}]
+        },
+    )
 
 
 def make_suite(tasks: list[EvalTask], name: str = "runner-suite") -> EvalSuite:
@@ -82,7 +109,7 @@ class TestLeakDetection:
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
         env = LeakEnvironment(dirty_tasks={"t1"})
         runner = make_runner(agent, environment=env)
-        suite = make_suite([make_task("t1", [auto_pass_grader("code_based")])])
+        suite = make_suite([make_task("t1", [passing_grader("code_based")])])
 
         with caplog.at_level(logging.WARNING, logger="agent_eval.core.runner"):
             run = await runner.run_suite(suite)
@@ -99,7 +126,7 @@ class TestLeakDetection:
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
         env = LeakEnvironment(dirty_tasks=set())
         runner = make_runner(agent, environment=env)
-        suite = make_suite([make_task("t1", [auto_pass_grader("code_based")])])
+        suite = make_suite([make_task("t1", [passing_grader("code_based")])])
 
         with caplog.at_level(logging.WARNING, logger="agent_eval.core.runner"):
             await runner.run_suite(suite)
@@ -114,7 +141,7 @@ class TestLeakDetection:
 
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
         runner = make_runner(agent, environment=BrokenEnv(dirty_tasks={"t1"}))
-        suite = make_suite([make_task("t1", [auto_pass_grader("code_based")])])
+        suite = make_suite([make_task("t1", [passing_grader("code_based")])])
 
         run = await runner.run_suite(suite)
 
@@ -133,7 +160,7 @@ class TestTransientRetry:
         )
         runner = make_runner(agent, max_trial_retries=2)
         suite = make_suite(
-            [make_task("t1", [auto_pass_grader("code_based")], max_trials=1)]
+            [make_task("t1", [passing_grader("code_based")], max_trials=1)]
         )
 
         run = await runner.run_suite(suite)
@@ -150,7 +177,7 @@ class TestTransientRetry:
         )
         runner = make_runner(agent, max_trial_retries=2)
         suite = make_suite(
-            [make_task("t1", [auto_pass_grader("code_based")], max_trials=1)]
+            [make_task("t1", [passing_grader("code_based")], max_trials=1)]
         )
 
         run = await runner.run_suite(suite)
@@ -160,6 +187,10 @@ class TestTransientRetry:
         assert "TransientError after 2 retries" in trial.error
         assert agent.call_counts["t1"] == 3  # 1 + 2 retries
         assert run.status == "completed"  # suite 不中断
+        # 接入方声明为瞬态 (= 基建故障而非 agent 能力): 评测没跑完, 不占分母
+        assert trial.verdict is TrialVerdict.INVALID
+        assert trial.invalid_reason is InvalidReason.EXTERNAL_DEPENDENCY_UNAVAILABLE
+        assert trial.termination_reason is TerminationReason.AGENT_ERROR
 
     async def test_suite_continues_after_exhausted_retries(self):
         agent = MockAgentRunner(
@@ -168,8 +199,8 @@ class TestTransientRetry:
         )
         runner = make_runner(agent, max_trial_retries=1)
         suite = make_suite([
-            make_task("t_bad", [auto_pass_grader("code_based")]),
-            make_task("t_ok", [auto_pass_grader("code_based")]),
+            make_task("t_bad", [passing_grader("code_based")]),
+            make_task("t_ok", [passing_grader("code_based")]),
         ])
 
         run = await runner.run_suite(suite)
@@ -186,7 +217,7 @@ class TestTransientRetry:
         )
         runner = make_runner(agent, per_trial_timeout=0.05)
         suite = make_suite(
-            [make_task("t1", [auto_pass_grader("code_based")], max_trials=1)]
+            [make_task("t1", [passing_grader("code_based")], max_trials=1)]
         )
 
         run = await runner.run_suite(suite)
@@ -195,6 +226,16 @@ class TestTransientRetry:
         assert trial.success is False
         assert "timed out" in trial.error
         assert agent.call_counts["t1"] == 1  # 不重试
+        # 任务 3.6: 超时是评测预算耗尽 → invalid, 不占分母也不进失败清单
+        assert trial.verdict is TrialVerdict.INVALID
+        assert trial.invalid_reason is InvalidReason.TRIAL_TIMEOUT
+        assert trial.metrics["latency_ms"] > 0
+        ts = run.summary.task_summaries[0]
+        assert ts.invalid_trials == 1
+        assert ts.valid_trials == 0
+        assert ts.pass_at_k[1] is None
+        assert ts.failures == []
+        assert ts.task_id not in run.summary.failures
 
 
 # ─── 3.3 Grader Pipeline (依赖拓扑 / 超时) ────────────────────────────────────
@@ -258,6 +299,14 @@ class TestGraderPipeline:
         assert results["always_pass"].score == 0.0
         assert "依赖未满足" in results["always_pass"].explanation
         assert "code_based" in results["always_pass"].explanation
+        # D3 边界: 依赖未通过是关于 agent 的结论 → valid, 仍占分母 (不是评测侧故障)
+        assert results["always_pass"].verdict is TrialVerdict.VALID
+        assert results["always_pass"].invalid_reason is None
+        assert run.trials["t1"][0].verdict is TrialVerdict.VALID
+        ts = run.summary.task_summaries[0]
+        assert ts.valid_trials == ts.total_trials
+        assert ts.invalid_trials == 0
+        assert ts.pass_at_k[1] == 0.0
 
     async def test_dependency_satisfied_runs(self):
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
@@ -265,7 +314,7 @@ class TestGraderPipeline:
             type=GraderType.CODE, name="always_pass", dependencies=["code_based"]
         )
         runner = make_runner(agent, graders=[AlwaysPassGrader()])
-        suite = make_suite([make_task("t1", [dependent, auto_pass_grader("code_based")])])
+        suite = make_suite([make_task("t1", [dependent, passing_grader("code_based")])])
 
         run = await runner.run_suite(suite)
 
@@ -288,7 +337,7 @@ class TestGraderPipeline:
         assert result.score == 0.0
         assert "依赖未满足" in result.explanation
 
-    async def test_grader_timeout_scores_zero(self):
+    async def test_grader_timeout_marks_invalid_not_zero(self):
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
         runner = make_runner(agent, graders=[SlowGrader(delay=1.0)], grader_timeout=0.05)
         suite = make_suite([make_task("t1", [GraderConfig(type=GraderType.CODE, name="slow_grader")])])
@@ -296,11 +345,44 @@ class TestGraderPipeline:
         run = await runner.run_suite(suite)
 
         result = run.trials["t1"][0].grader_results[0]
+        assert result.verdict is TrialVerdict.INVALID
+        assert result.invalid_reason is InvalidReason.GRADER_TIMEOUT
         assert result.score == 0.0
         assert result.passed is False
         assert "timeout" in result.explanation
+        # 评测侧故障不占分母 → 该 task 是证据不足, 不是「0% 通过」
+        ts = run.summary.task_summaries[0]
+        assert ts.total_trials == 3
+        assert ts.invalid_trials == 3
+        assert ts.valid_trials == 0
+        assert ts.pass_at_k[1] is None
+        assert set(ts.invalid_reasons.values()) == {"grader_timeout"}
+        assert ts.task_id not in run.summary.failures
 
-    async def test_unknown_grader_scores_zero(self):
+    async def test_grader_error_marks_invalid_and_run_continues(self):
+        class ExplodingGrader:
+            name = "exploding"
+
+            async def grade(self, trial, spans, task, context=None):
+                raise RuntimeError("judge connection reset")
+
+        agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
+        runner = make_runner(agent, graders=[ExplodingGrader()])
+        suite = make_suite(
+            [make_task("t1", [GraderConfig(type=GraderType.CODE, name="exploding")], max_trials=2)]
+        )
+
+        run = await runner.run_suite(suite)
+
+        assert run.status == "completed"  # 整场 run 继续正常完成而不崩溃
+        result = run.trials["t1"][0].grader_results[0]
+        assert result.verdict is TrialVerdict.INVALID
+        assert result.invalid_reason is InvalidReason.GRADER_ERROR
+        assert "judge connection reset" in result.explanation
+        ts = run.summary.task_summaries[0]
+        assert ts.invalid_reasons == {"0": "grader_error", "1": "grader_error"}
+
+    async def test_unknown_grader_marks_invalid(self):
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
         runner = make_runner(agent)
         suite = make_suite([make_task("t1", [GraderConfig(type=GraderType.CODE, name="nope")])])
@@ -308,6 +390,8 @@ class TestGraderPipeline:
         run = await runner.run_suite(suite)
 
         result = run.trials["t1"][0].grader_results[0]
+        assert result.verdict is TrialVerdict.INVALID
+        assert result.invalid_reason is InvalidReason.UNKNOWN_GRADER
         assert result.score == 0.0
         assert "Unknown grader" in result.explanation
 
@@ -493,9 +577,9 @@ class TestEvalContext:
 class TestSummaryStats:
     async def test_all_pass_triggers_saturation(self):
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
-        runner = make_runner(agent)
+        runner = make_runner(agent, min_valid_trials_for_saturation=3)
         suite = make_suite([
-            make_task(f"t{i}", [auto_pass_grader("code_based")]) for i in range(3)
+            make_task(f"t{i}", [passing_grader("code_based")], max_trials=3) for i in range(3)
         ])
 
         run = await runner.run_suite(suite)
@@ -504,7 +588,24 @@ class TestSummaryStats:
         sat = run.summary.saturation
         assert sat["is_saturated"] is True
         assert sat["saturation_ratio"] == 1.0
+        assert sat["eligible_tasks"] == ["t0", "t1", "t2"]
         assert "更有挑战性" in sat["recommendation"]
+
+    async def test_three_trials_each_is_below_default_saturation_sample(self):
+        """默认最小有效样本数为 5 → 3 trial 的全通过套件不参与饱和判定"""
+        agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
+        runner = make_runner(agent)
+        suite = make_suite([
+            make_task(f"t{i}", [passing_grader("code_based")], max_trials=3) for i in range(3)
+        ])
+
+        run = await runner.run_suite(suite)
+
+        sat = run.summary.saturation
+        assert sat["min_valid_trials"] == 5
+        assert sat["eligible_tasks"] == []
+        assert sat["insufficient_sample_tasks"] == ["t0", "t1", "t2"]
+        assert sat["is_saturated"] is False
 
     async def test_consistency_flags_unstable_trials(self):
         agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
@@ -531,11 +632,11 @@ class TestSummaryStats:
         # t_pending: 全部 trial pending; t_ok: 正常通过
         pending_graders = [
             GraderConfig(type=GraderType.CUSTOM, name="human"),
-            auto_pass_grader("code_based"),
+            passing_grader("code_based"),
         ]
         suite = make_suite([
             make_task("t_pending", pending_graders, max_trials=2),
-            make_task("t_ok", [auto_pass_grader("code_based")]),
+            make_task("t_ok", [passing_grader("code_based")]),
         ])
 
         run = await runner.run_suite(suite)
@@ -546,10 +647,148 @@ class TestSummaryStats:
 
         assert pending_ts.pending_trials == [0, 1]
         assert pending_ts.failures == []  # pending 不算失败
-        assert pending_ts.pass_at_k[1] == 0.0  # 无可计 trial
+        assert pending_ts.valid_trials == 0
+        assert pending_ts.pass_at_k[1] is None  # 证据不足, 不是 0.0
+        assert pending_ts.avg_score is None
+        assert pending_ts.task_id not in summary.failures
         assert ok_ts.pass_at_k[1] == 1.0
 
         # 人工评分请求已写入 storage
         requests = await runner.storage.list_human_score_requests()
         assert len(requests) == 2
         assert requests[0]["task_id"] == "t_pending"
+
+
+class TestStatisticsCaliber:
+    """specs/statistics 需要编排层才能验证的 scenario (任务 3.7/3.8)"""
+
+    async def test_lucky_single_success_is_not_saturated(self):
+        """Scenario: 蒙对一次不算饱和 → pass@1 回到 1/3"""
+        agent = MockAgentRunner(
+            latency_range=FAST,
+            script={"t1": ["failure", "success", "failure"]},
+        )
+        runner = make_runner(agent, min_valid_trials_for_saturation=3)
+        suite = make_suite([
+            make_task("t1", [outcome_grader()], max_trials=3),
+        ])
+
+        run = await runner.run_suite(suite)
+
+        ts = run.summary.task_summaries[0]
+        assert ts.pass_at_k[1] == pytest.approx(1 / 3)
+        assert ts.pass_at_k[2] == pytest.approx(2 / 3)
+        assert ts.pass_at_k[3] == 1.0
+        assert ts.estimates[1].method == "measured"
+        assert ts.estimates[1].extrapolated is False
+        # 旧口径下 n=3 有一次成功即 pass@1 = 1.0, 会被读成饱和
+        assert "t1" not in run.summary.saturation["saturated_tasks"]
+        assert ts.failures == [0, 2]
+
+    async def test_single_valid_trial_is_sample_insufficient_not_saturated(self):
+        """Scenario: 样本过少不判饱和"""
+        agent = MockAgentRunner(success_rate=1.0, latency_range=FAST)
+        runner = make_runner(agent)
+        suite = make_suite([make_task("t1", [passing_grader("code_based")], max_trials=1)])
+
+        run = await runner.run_suite(suite)
+
+        ts = run.summary.task_summaries[0]
+        assert ts.pass_at_k[1] == 1.0
+        assert ts.sample_sufficient is False
+        # 单个样本无离散度可言: std/consistent 为证据不足, 不是「完美一致」
+        assert ts.score_std_dev is None
+        assert ts.consistent is None
+        sat = run.summary.saturation
+        assert sat["saturated_tasks"] == []
+        assert sat["insufficient_sample_tasks"] == ["t1"]
+        # 饱和率的分母 (合格任务) 为 0 → None, 不得读成「实测 0% 饱和」
+        assert sat["saturation_ratio"] is None
+        assert sat["is_saturated"] is False
+
+    async def test_invalid_trial_excluded_from_denominator(self):
+        """Scenario: 无效 trial 不占分母 (2 有效 + 1 无效 → n=2)"""
+        agent = MockAgentRunner(
+            latency_range=FAST,
+            script={"t1": ["success", "success", "failure"]},
+        )
+
+        class FlakyJudgeGrader:
+            """第二个 trial 上抛异常, 其余正常"""
+
+            name = "flaky_judge"
+
+            async def grade(self, trial, spans, task, context=None):
+                if trial.trial_index == 1:
+                    raise RuntimeError("judge down")
+                return GraderResult(
+                    grader_name=self.name, grader_type=GraderType.CODE,
+                    score=1.0, passed=True, explanation="ok",
+                )
+
+        runner = make_runner(agent, graders=[FlakyJudgeGrader()])
+        suite = make_suite([
+            make_task(
+                "t1",
+                [GraderConfig(type=GraderType.CODE, name="flaky_judge")],
+                max_trials=3,
+            ),
+        ])
+
+        run = await runner.run_suite(suite)
+
+        ts = run.summary.task_summaries[0]
+        assert ts.total_trials == 3
+        assert ts.valid_trials == 2
+        assert ts.invalid_trials == 1
+        assert ts.invalid_trial_indices == [1]
+        assert ts.invalid_reasons == {"1": "grader_error"}
+        est = ts.estimates[1]
+        assert est.n == 2  # 分母是 2 而不是 3
+        assert est.value == 1.0
+        assert ts.failures == []  # 无效的 trial 不进失败清单
+
+    async def test_consistency_uses_the_weighted_series(self):
+        """Scenario: 配置了权重时口径统一 (一致性分母与成功判定同源)"""
+        agent = MockAgentRunner(
+            latency_range=FAST,
+            script={"t1": ["success", "success", "success"]},
+        )
+
+        class FixedScoreGrader:
+            name = "fixed_score"
+
+            async def grade(self, trial, spans, task, context=None):
+                return GraderResult(
+                    grader_name=self.name, grader_type=GraderType.CODE,
+                    score=1.0, passed=True, explanation="ok",
+                )
+
+        runner = make_runner(agent, graders=[FixedScoreGrader()])
+        suite = make_suite([
+            make_task(
+                "t1",
+                [
+                    GraderConfig(type=GraderType.CODE, name="fixed_score", weight=3.0),
+                    passing_grader("code_based", weight=1.0),
+                ],
+                max_trials=3,
+            ),
+        ])
+
+        run = await runner.run_suite(suite)
+
+        ts = run.summary.task_summaries[0]
+        trials = run.trials["t1"]
+        # 与成功判定同一条加权分序列: (3*1.0 + 1*1.0) / 4
+        expected = [
+            (3.0 * t.grader_results[0].score + 1.0 * t.grader_results[1].score) / 4.0
+            for t in trials
+        ]
+        mean = sum(expected) / len(expected)
+        expected_std = (sum((s - mean) ** 2 for s in expected) / len(expected)) ** 0.5
+        assert ts.score_std_dev == pytest.approx(expected_std)
+        assert ts.avg_score == pytest.approx(mean)
+        assert ts.score_distribution.mean == pytest.approx(mean)
+        assert ts.score_distribution.worst_of_n == pytest.approx(min(expected))
+        assert ts.consistent is True
