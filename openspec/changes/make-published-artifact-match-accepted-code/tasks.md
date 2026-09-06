@@ -52,29 +52,44 @@
 
 ## 5. 从制品验证（必须先于 tag）
 
-- [ ] 5.1 构建 wheel 与 sdist，检查其中确实包含新模块：`trace/mapping.py`、`trace/normalize.py`、`trace/observations.py`、`core/pricing.py`、`core/redaction.py`、`graders/_evidence.py`、`graders/_verdicts.py`（`pyproject` 是目录式 `packages = ["src/agent_eval"]`，但必须实测）
-- [ ] 5.2 建一个**干净虚拟环境**，装构建出的 wheel + `[api,cli]` extra（不带源码路径），在该环境跑 `PYTHONPATH` 为空的 `pytest tests/ -q` 与 `eval-suite run examples/minimal/suite.yaml`
-- [ ] 5.3 装 sdist 重复 5.2（防打包元数据只照顾了本地布局）
-- [ ] 5.4 记录制品验证结果：任何一项红，停下修，不带病打 tag
+- [x] 5.1 构建 wheel 与 sdist，检查其中确实包含新模块：`trace/mapping.py`、`trace/normalize.py`、`trace/observations.py`、`core/pricing.py`、`core/redaction.py`、`graders/_evidence.py`、`graders/_verdicts.py`（`pyproject` 是目录式 `packages = ["src/agent_eval"]`，但必须实测）
+  - `python -m build` 产出 `aeval_framework-0.2.0` wheel（70 个文件）与 sdist；7 个新模块**逐一实测全部在**两个制品里。
+- [x] 5.2 建一个**干净虚拟环境**，装构建出的 wheel + `[api,cli]` extra（不带源码路径），在该环境跑 `PYTHONPATH` 为空的 `pytest tests/ -q` 与 `eval-suite run examples/minimal/suite.yaml`
+  - $TEMP 下新建 venv，从 wheel 路径装 `[api,cli]`，`Location` 确认为 site-packages：**638 passed**（与工作树完全一致）+ 离线示例跑通（`Trace vocabulary: otel-genai … mapping=1`，6/6 valid）。首跑曾 6 个收集错误，根因是测试专用依赖 `httpx` 只在 `dev` extra 里声明（starlette TestClient 需要）——补装后全绿；这是测试工具链问题，不是包运行时缺依赖，无需改包。
+- [x] 5.3 装 sdist 重复 5.2（防打包元数据只照顾了本地布局）
+  - 另一干净 venv 从 sdist 安装（pip 现场构建）：**638 passed** + 离线示例跑通。
+- [x] 5.4 记录制品验证结果：任何一项红，停下修，不带病打 tag
+  - 全绿，无需修。仅有的 2 条 warning 是上游 Starlette TestClient 的弃用提示（httpx→httpx2、anyio 别名），与本项目代码无关。
 
 ## 6. 发布（每个对外可见动作都需用户确认）
 
 - [ ] 6.1 **取得用户明确授权**后才打 tag（PyPI 已发布版本不可撤回）；tag 命名沿用仓库既有习惯
+  - 未执行，等待用户授权。命名习惯已核实：现有 tag 仅 `v0.1.0`，下一个应为 **`v0.2.0`**。
 - [ ] 6.2 确认 `publish.yml` 触发前提：tag push 事件 + `PYPI_TOKEN` secret 有效
+  - 工作流已核实：`on: push: tags: v*`，OIDC trusted publishing（`pypi` environment）为主、项目级 `PYPI_TOKEN` 为兜底。secret 是否有效无法从本地确认（GitHub 不回读 secret 值），留到授权时由维护者在 GitHub Actions 上确认。
 - [ ] 6.3 发布后复验：在干净环境里 `pip install --upgrade aeval-framework`，确认解析到 0.2.0，并重跑 5.2 的两条命令
 - [ ] 6.4 push 与任何远端动作同样需要单独授权
 
 ## 7. 交接项（本变更不做，登记去向）
 
-- [ ] 7.1 宿主 finalize span 发往 Phoenix 的三个假零（`getattr(result, 'turns'|'total_tokens'|'duration_ms', 0)`，`RunResult` 无这些字段）→ 属宿主仓库变更，动手前先量 `run_span_collector` 的属性形状
-- [ ] 7.2 `agenthub.agent_name` 补齐后把 `agent.name` 接入映射（已决定不把 agent_id 当名字）
-- [ ] 7.3 下一个真正的能力变更是 ④ agent 指标目录（宽签名 `measure()`、judge 看轨迹、跨评分者一致性 κ/α、`reward_basis` 式乘性安全门、轨迹默认仅诊断）→ 需另立 change 与提案
-- [ ] 7.4 宿主 `docs/eval-harness-design*.md` 仍留着 ① 修掉的旧 `pass@k` 实现且被标"✅ 已修复" → 宿主文档改动
-- [ ] 7.5 宿主 `ruff check .` 基线 117 个错误，与其 CLAUDE.md 自检清单矛盾 → 需用户允许触碰非评测代码后处理
+- [x] 7.1 宿主 finalize span 发往 Phoenix 的三个假零（`getattr(result, 'turns'|'total_tokens'|'duration_ms', 0)`，`RunResult` 无这些字段）→ 属宿主仓库变更，动手前先量 `run_span_collector` 的属性形状
+  - 登记：宿主仓库独立变更；动手前置条件（先量 `run_span_collector` 属性形状）随项携带。
+- [x] 7.2 `agenthub.agent_name` 补齐后把 `agent.name` 接入映射（已决定不把 agent_id 当名字）
+  - 登记：宿主仓库变更；前置是宿主侧先补齐 `agenthub.agent_name` 字段，然后作为 `TRACE_MAPPING_ENTRIES` 追加条目 + `TRACE_MAPPING_VERSION` 递增（现 `agenthub-3`）。
+- [x] 7.3 下一个真正的能力变更是 ④ agent 指标目录（宽签名 `measure()`、judge 看轨迹、跨评分者一致性 κ/α、`reward_basis` 式乘性安全门、轨迹默认仅诊断）→ 需另立 change 与提案
+  - 登记：另立 change，走 `openspec-propose`；不在本变更或其后续里顺手做。
+- [x] 7.4 宿主 `docs/eval-harness-design*.md` 仍留着 ① 修掉的旧 `pass@k` 实现且被标"✅ 已修复" → 宿主文档改动
+  - 登记（范围经本次核对收窄）：`eval-harness-design.md` §4.3 已由 ③ 7.5 换成①修正口径；旧实现残留在 **`eval-harness-design-review.md`**，而那是当时的审查快照（"缺陷 1 ✅ 已修复"的标注属于历史记录），③ 的记录明确它是刻意保留。去向：宿主仓库低优先级文档变更——如要动，只应给该文件加"历史快照，非现行契约"的标注，而不是改写快照内容。
+- [x] 7.5 宿主 `ruff check .` 基线 117 个错误，与其 CLAUDE.md 自检清单矛盾 → 需用户允许触碰非评测代码后处理
+  - 登记：宿主仓库全库清理，须用户先授权触碰非评测代码；本变更只对触及文件负责（见 8.2）。
 
 ## 8. 验证门（本变更收尾）
 
-- [ ] 8.1 Aeval：`ruff check packages/agent-eval` 通过 + `PYTHONPATH=src pytest tests/ -q` 全绿
-- [ ] 8.2 宿主：`pytest tests/test_eval_integration_* -q` 全绿；我改动文件零新增 ruff 错误（基线有既有告警）
-- [ ] 8.3 `openspec validate --all --strict` 通过；`openspec list --json` 仅剩本变更
-- [ ] 8.4 两个仓库 `git status` 干净（除刻意排除项），且 1.6 的签名配对检查再次成立
+- [x] 8.1 Aeval：`ruff check packages/agent-eval` 通过 + `PYTHONPATH=src pytest tests/ -q` 全绿
+  - 收尾复跑：ruff All checks passed；**638 passed**。
+- [x] 8.2 宿主：`pytest tests/test_eval_integration_* -q` 全绿；我改动文件零新增 ruff 错误（基线有既有告警）
+  - 收尾复跑：四个 eval_integration 测试文件 **59 passed**。触及文件 ruff 仅 1 条 UP041（runner.py:493 `asyncio.TimeoutError`），已验证在迁移前提交 `90f3a78` 的同一处就存在（当时 ：407）——零新增。
+- [x] 8.3 `openspec validate --all --strict` 通过；`openspec list --json` 仅剩本变更
+  - 12 passed / 0 failed；changes 仅剩 `make-published-artifact-match-accepted-code`。
+- [x] 8.4 两个仓库 `git status` 干净（除刻意排除项），且 1.6 的签名配对检查再次成立
+  - Aeval：仅本变更 tasks.md 的记账改动（随本笔提交入库）。宿主：评测相关全部落盘（补第 2 笔 `b35f8d3`：③ 7.5 的 `docs/eval-harness-design.md` 改写——此前它也是"只在工作树里"的验收成果，正是本变更要消灭的状态）；其余 20+ 个 memory/auth/前端等未提交改动为并发会话的在途工作，刻意排除。签名配对：两个 HEAD 的 `grep -c "view: TaskView, session: TrialSession) -> TrialEvidence"` 均 = 1。
