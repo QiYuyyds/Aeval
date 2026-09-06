@@ -8,7 +8,7 @@ CLI 消费 (交互视图由 Dashboard 覆盖, 不做 HTML/图表)。
 from __future__ import annotations
 
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from agent_eval.core.types import RunResult
 from agent_eval.metrics.batch_evaluation import BatchEvaluationResult
@@ -28,13 +28,17 @@ def render_batch_report(
     return _render_batch_markdown(result)
 
 
-def render_run_report(run: RunResult, fmt: ReportFormat = "markdown") -> str:
-    """渲染 run 结果 (markdown: 汇总 + 任务分解; json: 纯 dump)。"""
+def render_run_report(run: RunResult, fmt: ReportFormat = "markdown", verbose: bool = False) -> str:
+    """渲染 run 结果 (markdown: 汇总 + 任务分解; json: 纯 dump)。
+
+    ``verbose=False`` (默认) 时诊断块折叠为一行 —— 诊断量不进分母, 报告也
+    不让它们抢判分量的视线; ``--verbose`` 展开。
+    """
     if fmt == "json":
         return json.dumps(run.model_dump(), ensure_ascii=False, indent=2)
     if fmt != "markdown":
         raise ValueError(f"Unsupported report format: {fmt!r} (use 'markdown' or 'json')")
-    return _render_run_markdown(run)
+    return _render_run_markdown(run, verbose=verbose)
 
 
 # ─── Markdown 渲染 ───────────────────────────────────────────────────────────
@@ -90,7 +94,7 @@ def _render_batch_markdown(result: BatchEvaluationResult) -> str:
     return "\n".join(lines)
 
 
-def _render_run_markdown(run: RunResult) -> str:
+def _render_run_markdown(run: RunResult, verbose: bool = False) -> str:
     lines: list[str] = ["# Aeval 评测 Run 报告", "", "## 概览", ""]
 
     lines.append(f"- Run ID: {run.run_id}")
@@ -129,6 +133,54 @@ def _render_run_markdown(run: RunResult) -> str:
     lines.append(f"- 平均分: {_score(summary.avg_score)}")
     lines.append("")
 
+    # 诊断块 (默认折叠) 与 agreement 分块呈现 —— self-consistency 与评分者间
+    # 信度是两类量, 不混排 (spec: statistics)
+    diagnostics = getattr(summary, "diagnostic_metrics", None) or []
+    if diagnostics:
+        if verbose:
+            lines += ["## 诊断指标 (不进通过率/分母/判分聚合)", ""]
+            lines.append("| 指标 | n | 平均 | 最小 | 最大 | p50 | 计算失败 |")
+            lines.append("|------|---|------|------|------|-----|----------|")
+            for d in diagnostics:
+                lines.append(
+                    f"| {d.name} | {d.n} | {_score(d.avg)} | {_score(d.min)} "
+                    f"| {_score(d.max)} | {_score(d.p50)} | {d.errors} |"
+                )
+            lines.append("")
+        else:
+            lines.append(
+                f"- 诊断指标: {len(diagnostics)} 项 (不进任何分母; "
+                "报告 JSON / --verbose 可展开)"
+            )
+            lines.append("")
+
+    agreement = getattr(summary, "agreement", None) or {}
+    if agreement:
+        lines += ["## 跨评分者一致性 (inter-rater)", ""]
+        lines.append(
+            "单评分者多采样的 confidence 是自一致 (self-consistency), "
+            "与这里的评分者间信度是两类量。"
+        )
+        lines.append("")
+        lines.append("| 判据 | 量 | 值 | 评分者 | 对齐样本 | 一致/分歧 | 说明 |")
+        lines.append("|------|----|----|--------|----------|-----------|------|")
+        for name, report in agreement.items():
+            measure_label = {
+                "cohen_kappa": "Cohen's κ",
+                "krippendorff_alpha": "Krippendorff's α",
+            }.get(report.measure or "", "—")
+            pair = (
+                f"{report.agree}/{report.disagree}"
+                if report.agree is not None and report.disagree is not None
+                else "—"
+            )
+            lines.append(
+                f"| {name} | {measure_label} | {_score(report.value)} "
+                f"| {report.raters} | {report.aligned_samples} | {pair} "
+                f"| {report.reason or '—'} |"
+            )
+        lines.append("")
+
     lines += ["## 任务分解", ""]
     if summary.task_summaries:
         lines.append(
@@ -163,5 +215,37 @@ def _render_run_markdown(run: RunResult) -> str:
             f"ratio={_pct(saturation.get('saturation_ratio'))} "
             f"(分母: 合格任务 {len(eligible)}, 样本不足 {len(insufficient)})"
         )
+
+    # 门结果 (因子/生效/原因) 在报告可见 (spec: graders)
+    gate_lines = _gate_lines(run)
+    if gate_lines:
+        lines += ["## 门 (gate) 结果", ""] + gate_lines + [""]
     lines.append("")
     return "\n".join(lines)
+
+
+def _gate_lines(run: RunResult) -> list[str]:
+    """汇总各门判据的因子与生效情况 (逐 trial 原因取第一条代表)。"""
+    stats: dict[str, dict[str, Any]] = {}
+    for trials in run.trials.values():
+        for trial in trials:
+            for gr in trial.grader_results:
+                if gr.gate_factor is None:
+                    continue
+                entry = stats.setdefault(
+                    gr.grader_name,
+                    {"factor": gr.gate_factor, "applied": 0, "skipped": 0, "reason": ""},
+                )
+                if gr.gate_applied:
+                    entry["applied"] += 1
+                else:
+                    entry["skipped"] += 1
+                    entry["reason"] = entry["reason"] or (gr.gate_reason or "")
+    lines: list[str] = []
+    for name, entry in sorted(stats.items()):
+        lines.append(
+            f"- {name}: factor={entry['factor']} 生效 {entry['applied']} 次 / "
+            f"未生效 {entry['skipped']} 次"
+            + (f" (未生效原因示例: {entry['reason']})" if entry["skipped"] else "")
+        )
+    return lines

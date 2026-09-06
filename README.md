@@ -18,6 +18,7 @@
 - **REST API & SSE** — mount the eval API in any FastAPI app or serve it standalone (`/v1`), with run event streaming.
 - **CLI** — `eval-suite run / validate / list / show / compare / serve`.
 - **Datasets & LLM metrics** — build datasets from traces, regenerate suites, and score outputs with RAG-style quality metrics (answer relevancy, faithfulness, context recall/precision).
+- **Evidence-aware metrics & inter-rater agreement** — metrics measure through an evidence-aware `MeasurementContext` (declare the channels they consume — transcript, steps, harness/subject state — and only those are delivered, with provenance and capture timestamps), trajectory-aware judges see the full transcript, trajectory metrics are diagnostic-only by default (out of every denominator until explicitly promoted), hard safety criteria can be declared as multiplicative **gates** that collapse the total score instead of being averaged away, and two independent judges on one criterion report Cohen's κ / Krippendorff's α — clearly separated from single-judge multi-sample self-consistency.
 
 ## Installation
 

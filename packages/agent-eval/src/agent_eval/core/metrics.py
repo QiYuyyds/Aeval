@@ -28,6 +28,7 @@ from agent_eval.core.pricing import PRICE_TABLE_NOT_CONFIGURED, PriceTable
 from agent_eval.core.types import (
     DEFAULT_BOOTSTRAP_ROUNDS,
     DEFAULT_CONFIDENCE_LEVEL,
+    AgreementReport,
     EvidenceGap,
     InvalidReason,
     PassKEstimate,
@@ -244,6 +245,193 @@ def summarize_scores(
         ci_high=high,
         ci_level=confidence,
         method="bootstrap",
+    )
+
+
+# ─── Inter-rater agreement (κ / α, spec: statistics) ─────────────────────────
+
+# 一致性可计算的最少对齐样本数 (同一 trial 上 ≥2 个评分者都有有效判定)。
+# 与饱和判定的最小有效样本同量级: 单 run 的 trial 数是个位数到几十, 少于这个
+# 数的 κ/α 是噪声, 标 insufficient_data 而不是给一个可被误读的数值。
+MIN_ALIGNED_RATINGS_FOR_AGREEMENT = 5
+
+
+def cohen_kappa(labels_a: list[str], labels_b: list[str]) -> float:
+    """未加权 Cohen's κ (两评分者, 二值/多类通用; 文献 Cohen 1960)。
+
+    κ = (p_o - p_e) / (1 - p_e); p_o = 观察一致率, p_e = 边缘分布独立假设下的
+    期望一致率。两序列必须等长且非空; p_e == 1 (两人都只判同一类) 时定义无
+    意义, 返回 1.0 (完全一致是唯一合理读法)。
+
+    Examples:
+        >>> # 经典 2x2 表 [[20, 5], [10, 15]] (行=评分者A, 列=评分者B) → κ = 0.4
+        >>> a = ["yes"]*20 + ["yes"]*5 + ["no"]*10 + ["no"]*15
+        >>> b = ["yes"]*20 + ["no"]*5 + ["yes"]*10 + ["no"]*15
+        >>> round(cohen_kappa(a, b), 10)
+        0.4
+        >>> cohen_kappa(["a", "b"], ["a", "b"])
+        1.0
+    """
+    if len(labels_a) != len(labels_b):
+        raise ValueError("κ 要求两个评分者的标签序列等长")
+    n = len(labels_a)
+    if n == 0:
+        raise ValueError("κ 要求至少一个对齐样本")
+    agree = sum(1 for a, b in zip(labels_a, labels_b, strict=True) if a == b)
+    p_o = agree / n
+    categories = set(labels_a) | set(labels_b)
+    p_e = sum(
+        (labels_a.count(c) / n) * (labels_b.count(c) / n) for c in categories
+    )
+    if p_e == 1.0:
+        return 1.0
+    return (p_o - p_e) / (1.0 - p_e)
+
+
+def krippendorff_alpha(
+    units: list[list[str | None]],
+    level: str = "nominal",
+) -> float:
+    """Krippendorff's α (nominal / ordinal, 容忍缺失; Krippendorff 2011)。
+
+    ``units`` 是逐单元 (trial) 的评分者取值列表, ``None`` = 该评分者本单元
+    缺失 (不冒充一致或分歧)。只有观测值 ≥2 的单元参与 (α 的定义域)。
+
+    α = 1 - D_o / D_e; D_o = 巧合对里的观测分歧率, D_e = 边缘分布下的期望
+    分歧率。nominal: δ(c,k) = [c != k]; ordinal: δ(c,k) 用累积边缘的平方差
+    (序数距离)。全一致 → 1.0; 无任何可配对单元 → insufficient (返回 None
+    的判定由调用方做, 这里 raise)。
+    """
+    if level not in ("nominal", "ordinal"):
+        raise ValueError(f"未知的 α 测量层级: {level!r} (可选 nominal / ordinal)")
+
+    # 巧合矩阵 (coincidence matrix): 每个单元内取值两两配对, 按 1/(m_u-1) 计权
+    coincidence: dict[tuple[str, str], float] = {}
+    for values in units:
+        observed = [v for v in values if v is not None]
+        m_u = len(observed)
+        if m_u < 2:
+            continue
+        counts: dict[str, int] = {}
+        for value in observed:
+            counts[value] = counts.get(value, 0) + 1
+        for c, n_c in counts.items():
+            for k, n_k in counts.items():
+                pair_total = n_c * n_k - (n_c if c == k else 0)
+                if pair_total:
+                    key = (c, k)
+                    coincidence[key] = coincidence.get(key, 0.0) + pair_total / (m_u - 1)
+
+    n_prime = sum(coincidence.values())
+    if n_prime == 0:
+        raise ValueError("α 要求至少一个单元有 ≥2 个评分者的有效判定")
+
+    # 边缘 (行和): n_c = Σ_k o_ck
+    categories = sorted({c for c, _ in coincidence})
+    marginals = {
+        c: sum(coincidence.get((c, k), 0.0) for k in categories) for c in categories
+    }
+
+    if level == "nominal":
+        observed_disagreement = sum(
+            weight for (c, k), weight in coincidence.items() if c != k
+        ) / n_prime
+        expected_disagreement = sum(
+            marginals[c] * marginals[k]
+            for c in categories
+            for k in categories
+            if c != k
+        ) / (n_prime * (n_prime - 1.0))
+    else:
+        # ordinal: δ(c,k) = (Σ_{c ≤ g < k} n_g)²  (按类别自然序, 相邻累积边缘)
+        order = {c: i for i, c in enumerate(categories)}
+        cumulative = [0.0]
+        for c in categories:
+            cumulative.append(cumulative[-1] + marginals[c])
+
+        def delta(c: str, k: str) -> float:
+            lo, hi = order[c], order[k]
+            if lo == hi:
+                return 0.0
+            lo, hi = min(lo, hi), max(lo, hi)
+            return (cumulative[hi] - cumulative[lo]) ** 2
+
+        observed_disagreement = sum(
+            weight * delta(c, k) for (c, k), weight in coincidence.items() if c != k
+        ) / n_prime
+        expected_disagreement = sum(
+            marginals[c] * marginals[k] * delta(c, k)
+            for c in categories
+            for k in categories
+        ) / (n_prime * (n_prime - 1.0))
+
+    if expected_disagreement == 0.0:
+        return 1.0  # 全体评分者对全部单元给出同一取值: 完全一致
+    return 1.0 - observed_disagreement / expected_disagreement
+
+
+def agreement_report(
+    raters: list[str],
+    units: list[dict[str, str | None]],
+) -> AgreementReport:
+    """对齐后的多评分者判定 → κ / α 报告 (选择语义见 design D3)。
+
+    - <2 个评分者 → 不可计算 (评分者不足), 不伪造数值;
+    - 对齐样本 < MIN_ALIGNED_RATINGS_FOR_AGREEMENT → insufficient_data + 原因;
+    - 恰 2 个评分者且无缺失 → Cohen's κ (附一致/分歧计数);
+    - ≥2 评分者或存在缺失评分 → Krippendorff's α (nominal, 缺失单元不参与)。
+    """
+    rated_units = [u for u in units if any(u.get(r) is not None for r in raters)]
+    pair_units = [
+        u for u in rated_units if sum(1 for r in raters if u.get(r) is not None) >= 2
+    ]
+    missing_present = any(
+        sum(1 for r in raters if u.get(r) is not None) < len(raters)
+        for u in rated_units
+    )
+    if len(raters) < 2:
+        return AgreementReport(
+            measure=None,
+            value=None,
+            reason=(
+                "insufficient_data: 评分者不足 (κ/α 需要 ≥2 个独立评分者; "
+                "单评分者多采样的 confidence 是自一致, 不是评分者间信度)"
+            ),
+            raters=len(raters),
+            aligned_samples=len(pair_units),
+        )
+    if len(pair_units) < MIN_ALIGNED_RATINGS_FOR_AGREEMENT:
+        return AgreementReport(
+            measure=None,
+            value=None,
+            reason=(
+                f"insufficient_data: 对齐样本过少 ({len(pair_units)} < "
+                f"{MIN_ALIGNED_RATINGS_FOR_AGREEMENT})"
+            ),
+            raters=len(raters),
+            aligned_samples=len(pair_units),
+        )
+
+    if len(raters) == 2 and not missing_present:
+        first, second = raters
+        labels_a = [u[first] for u in pair_units]
+        labels_b = [u[second] for u in pair_units]
+        agree = sum(1 for a, b in zip(labels_a, labels_b, strict=True) if a == b)
+        return AgreementReport(
+            measure="cohen_kappa",
+            value=cohen_kappa(labels_a, labels_b),
+            raters=2,
+            aligned_samples=len(pair_units),
+            agree=agree,
+            disagree=len(pair_units) - agree,
+        )
+
+    matrix = [[u.get(r) for r in raters] for u in pair_units]
+    return AgreementReport(
+        measure="krippendorff_alpha",
+        value=krippendorff_alpha(matrix, level="nominal"),
+        raters=len(raters),
+        aligned_samples=len(pair_units),
     )
 
 

@@ -44,6 +44,11 @@ class ScoreStrategy(str, Enum):
     HYBRID = "hybrid"  # required 必须通过 + 非 required 加权
 
 
+RewardBasis = Literal["additive", "multiplicative"]
+"""总分合成方式: additive = 既有加性/均值 (默认, 与 0.2.0 逐位一致);
+multiplicative = 总分 = 基础分 × ∏(生效门因子), 硬性维度失败不被平均稀释。"""
+
+
 class TrialVerdict(str, Enum):
     """一次 trial / 一个 grader 结论的分类。
 
@@ -274,6 +279,36 @@ class CapturePolicy(BaseModel):
 _CAPTURE_CLOSED = CapturePolicy()
 
 
+class GateSpec(BaseModel):
+    """判据的门声明 —— 乘性合成时该判据失败会把总分按因子塌缩。"""
+
+    factor: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="门因子 ∈ [0,1]; 判为失败且生效时乘入总分 (0 = 硬门, 失败即总分 0)",
+    )
+
+
+class JudgeDefinition(BaseModel):
+    """判据的一个独立评分者定义 (不同模型/提示词) —— κ/α 的最小单元。
+
+    ``config`` 覆盖判据自身 config 的同名字段 (如 model/prompt); 每个定义
+    对同一批 trial 独立评分, 结果按 trial 对齐后计算跨评分者一致性。
+    """
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$",
+        description="评分者标识 (rater_scores 与 agreement 报告里的键)",
+    )
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="该评分者覆盖判据 config 的字段 (model/prompt 等)",
+    )
+
+
 class GraderConfig(BaseModel):
     """单个评分器的配置"""
 
@@ -310,6 +345,20 @@ class GraderConfig(BaseModel):
         description="环境状态类判据所依据的时刻 (默认「结束时」); 时刻随结论可见",
     )
 
+    # ── reward_basis 门 (spec: graders 乘性安全门) ──
+    gate: GateSpec | None = Field(
+        None,
+        description="把该判据声明为门 (乘性合成时失败按因子塌缩总分); "
+        "None = 普通判据。门不得放行被评方自报证据单独支撑",
+    )
+
+    # ── 跨评分者一致性 (spec: statistics κ/α) ──
+    judges: list[JudgeDefinition] = Field(
+        default_factory=list,
+        description="独立评分者定义 (≥2 个 = 多评分者判据, 每个对同一批 trial "
+        "独立评分, 汇总报告 κ/α); 空 = 单评分者 (多采样 confidence 是自一致)",
+    )
+
     @field_validator("evidence")
     @classmethod
     def _validate_evidence(cls, v: list[ObservedBy]) -> list[ObservedBy]:
@@ -323,6 +372,19 @@ class GraderConfig(BaseModel):
             raise ValueError(f"evidence 含重复级别: {duplicates}")
         return v
 
+    @model_validator(mode="after")
+    def _validate_gate_and_judges(self) -> GraderConfig:
+        if self.gate is not None and self.allow_subject:
+            raise ValueError(
+                f"门判据 '{self.name}' 不得设置 allow_subject: "
+                "subject 级自报证据不得触发门 (门的判定只能依据评测侧可取信的级别)"
+            )
+        judge_names = [j.name for j in self.judges]
+        if len(judge_names) != len(set(judge_names)):
+            duplicates = sorted({n for n in judge_names if judge_names.count(n) > 1})
+            raise ValueError(f"judges 含重复评分者名: {duplicates}")
+        return self
+
 
 class EvalTask(BaseModel):
     """单个评测任务"""
@@ -335,6 +397,15 @@ class EvalTask(BaseModel):
     max_trials: int = Field(3, ge=1, description="默认 trial 数")
     score_strategy: ScoreStrategy = Field(ScoreStrategy.HYBRID, description="评分聚合策略")
     score_threshold: float = Field(0.7, ge=0.0, le=1.0, description="通过阈值 (用于 WEIGHTED/HYBRID)")
+    reward_basis: RewardBasis | None = Field(
+        None,
+        description="该 task 的总分合成方式; None = 继承 suite 级声明 (缺省 additive)",
+    )
+    diagnostic_metrics: list[str] = Field(
+        default_factory=list,
+        description="仅诊断运行的指标名 (分值进报告诊断块, 不进任何分母); "
+        "被本 task 判据显式引用 (type: metric) 的指标视为已升格, 不再重复诊断运行",
+    )
     tracked_metrics: list[str] = Field(
         default_factory=lambda: [
             "n_turns",
@@ -427,6 +498,38 @@ class EvalTask(BaseModel):
                 return g.config
         return {}
 
+    def promoted_metric_names(self) -> set[str]:
+        """本 task 判据显式引用的指标名 (type: metric = 升格为判分量)。"""
+        promoted: set[str] = set()
+        for g in self.graders:
+            if g.type is not GraderType.METRIC:
+                continue
+            explicit = g.config.get("metric_name")
+            promoted.add(str(explicit) if explicit else g.name)
+        return promoted
+
+    def _require_non_gate_criterion(self, basis: str) -> None:
+        """multiplicative 合成的装配前提: 至少一个非门判据承载基础分。
+
+        全是门的基础分无从谈起 (门因子只能塌缩, 不能撑起), 显式拒绝而不是
+        恒 0 分跑完。
+        """
+        if all(g.gate is not None for g in self.graders):
+            raise ValueError(
+                f"reward_basis=multiplicative 时 task '{self.id}' 至少需要一个"
+                "非门判据承载基础分 (门因子只能塌缩总分, 不能构成基础分)"
+            )
+
+    @model_validator(mode="after")
+    def _validate_reward_basis(self) -> EvalTask:
+        if self.reward_basis == "multiplicative":
+            self._require_non_gate_criterion(self.reward_basis)
+        dupes = sorted({m for m in self.diagnostic_metrics if
+                        self.diagnostic_metrics.count(m) > 1})
+        if dupes:
+            raise ValueError(f"diagnostic_metrics 含重复指标名: {dupes}")
+        return self
+
 
 class TaskView(BaseModel):
     """递给被评方的任务视图 —— 只含执行所需的输入与环境参数。
@@ -466,6 +569,11 @@ class EvalSuite(BaseModel):
         False,
         description="suite 级工具入参/结果采集开关 (默认关闭; task 级可覆盖)。"
         "与 capture.tool_arguments 同一处落点, 不是第二个开关",
+    )
+    reward_basis: RewardBasis = Field(
+        "additive",
+        description="suite 级总分合成方式 (默认 additive, 与 0.2.0 逐位一致); "
+        "task 级可覆盖。multiplicative 时每个 task 仍须至少一个非门判据",
     )
 
     @field_validator("name")
@@ -511,6 +619,20 @@ class EvalSuite(BaseModel):
         if task is None or task.capture is None:
             return CapturePolicy().resolve(self.capture)
         return task.capture.resolve(self.capture)
+
+    def resolved_reward_basis(self, task: EvalTask) -> RewardBasis:
+        """该 task 生效的总分合成方式 (task 级声明覆盖 suite 级)。"""
+        return task.reward_basis or self.reward_basis
+
+    @model_validator(mode="after")
+    def _validate_inherited_reward_basis(self) -> EvalSuite:
+        """suite 级 multiplicative 会下渗到未显式声明的 task: 逐个校验前提。"""
+        if self.reward_basis != "multiplicative":
+            return self
+        for task in self.tasks:
+            if task.reward_basis is None:
+                task._require_non_gate_criterion(self.reward_basis)
+        return self
 
     def capture_for(self, task: EvalTask) -> bool:
         """该 task 的工具入参采集声明 (``resolved_capture`` 的便捷读取)。"""
@@ -883,6 +1005,138 @@ class TrialEvidence(BaseModel):
         return window
 
 
+# ─── Metric measurement context (spec: llm-metrics 宽签名) ───────────────────
+
+
+class MetricRole(str, Enum):
+    """指标在目录中的角色轴 (spec: 轨迹指标默认仅诊断, 升格须显式)。
+
+    diagnostic: 只出现在报告的诊断块, 不进通过率分子分母、不参与判分;
+    judging: 经套件判据引用后参与判分 (诊断量升格必须由套件显式声明)。
+    """
+
+    DIAGNOSTIC = "diagnostic"
+    JUDGING = "judging"
+
+
+# 指标取信声明的可选通道 (与 TrialEvidence 的通道名一一对应; artifacts/budget
+# 不在指标可声明范围内 —— 指标消费的是过程与状态读数, 产物检查是 grader 的活)
+METRIC_EVIDENCE_CHANNELS: tuple[str, ...] = (
+    "transcript",
+    "steps",
+    "harness_state",
+    "subject_state",
+)
+
+
+class MetricEvidenceDeclaration(BaseModel):
+    """指标的取信声明 —— 通道级, 复用 ③ 评分器取信声明的校验语义。
+
+    ``evidence_levels=None`` = 未声明 = 只看最终输出 (与 0.2.0 逐字节等价);
+    显式声明了就必须是已知通道的非空列表, 空声明/未知通道/重复都装配期报错
+    并列出可选值 —— 收紧证据边界靠声明, 不靠指标自觉。
+    """
+
+    evidence_levels: tuple[str, ...] | None = Field(
+        None,
+        description="该指标允许消费的通道; None = 未声明 = 仅最终输出",
+    )
+
+    @field_validator("evidence_levels")
+    @classmethod
+    def _validate_channels(
+        cls, v: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError(
+                "evidence_levels 不能为空列表: 一个通道都不读就别声明 "
+                "(不写该字段即 = 仅最终输出)"
+            )
+        unknown = sorted(set(v) - set(METRIC_EVIDENCE_CHANNELS))
+        if unknown:
+            raise ValueError(
+                f"evidence_levels 含未知通道 {unknown}; 可选值: "
+                f"{list(METRIC_EVIDENCE_CHANNELS)}"
+            )
+        duplicates = sorted({x for x in v if list(v).count(x) > 1})
+        if duplicates:
+            raise ValueError(f"evidence_levels 含重复通道: {duplicates}")
+        return v
+
+    @property
+    def channels(self) -> frozenset[str]:
+        """生效的通道集合 (未声明 = 空集 = 仅最终输出)。"""
+        return frozenset(self.evidence_levels or ())
+
+    @property
+    def wants_trajectory(self) -> bool:
+        """是否声明了轨迹通道 (transcript/steps) —— judge 轨迹注入的前提。"""
+        return bool(self.channels & {"transcript", "steps"})
+
+    def described(self) -> list[str]:
+        """落盘/呈现形式: 未声明显式为空列表 (不是 None 冒充没配置)。"""
+        return sorted(self.channels)
+
+
+class MeasurementContext(BaseModel):
+    """指标测量的唯一入参 (spec: llm-metrics 宽签名, 旧五字符串签名已移除)。
+
+    任务输入与 RAG 物料是 0.2.0 五参的逐字段等价物; ``observations`` 是按
+    指标声明从该 trial 的 ``TrialEvidence`` 裁出的观测序列 —— 未声明的通道
+    不在这里出现 (读不到, 而不是别去读)。
+    """
+
+    task_id: str = Field("", description="任务标识")
+    prompt: str = Field("", description="用户输入 (旧签名 input)")
+    actual_output: str = Field("", description="Agent 最终输出 (旧签名 actual_output)")
+    expected_output: str | None = Field(None, description="期望输出 (旧签名同名字段)")
+    context: list[str] | None = Field(
+        None, description="回答所依据的上下文 (RAG, 旧签名同名字段)"
+    )
+    retrieval_context: list[str] | None = Field(
+        None, description="检索到的原始文档 (RAG, 旧签名同名字段)"
+    )
+    observations: list[Observation] = Field(
+        default_factory=list,
+        description="按指标声明过滤后的观测 (带 observed_by 与采集时刻); "
+        "默认声明下为空 —— 最终输出始终经 actual_output 交付",
+    )
+    declaration: MetricEvidenceDeclaration = Field(
+        default_factory=MetricEvidenceDeclaration,
+        description="该指标生效的取信声明 (通道级)",
+    )
+
+    @classmethod
+    def of(
+        cls,
+        input: str = "",
+        actual_output: str = "",
+        expected_output: str | None = None,
+        context: list[str] | None = None,
+        retrieval_context: list[str] | None = None,
+        task_id: str = "",
+    ) -> MeasurementContext:
+        """五参便捷构造 (独立调用方 —— prompt A/B / 批量评测 / pytest 插件)。"""
+        return cls(
+            task_id=task_id,
+            prompt=input,
+            actual_output=actual_output,
+            expected_output=expected_output,
+            context=context,
+            retrieval_context=retrieval_context,
+        )
+
+    def messages(self) -> list[Any]:
+        """声明通道内的 transcript 消息序列 (每条为原始读数值)。"""
+        return [
+            obs.value
+            for obs in self.observations
+            if obs.kind is EvidenceKind.TRANSCRIPT and not obs.is_absent
+        ]
+
+
 def _merge_state(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     """合并多次取证以回答「任一时刻」: 这是存在量词, 中途出现过的东西不能丢。
 
@@ -920,10 +1174,12 @@ class GraderResult(BaseModel):
     explanation: str = Field("", description="评分理由")
     details: dict[str, Any] = Field(default_factory=dict, description="类型特定的详情")
     confidence: float = Field(
-        1.0, ge=0.0, le=1.0, description="置信度 (多采样时 = 1 - 不确定性)"
+        1.0, ge=0.0, le=1.0,
+        description="自一致置信度 (self-consistency): 单评分者多采样时 = 1 - 不确定性。"
+        "这是同一 judge 的自一致, 不是跨评分者信度 —— 信度见 RunSummary.agreement 的 κ/α",
     )
     uncertainty: float = Field(
-        0.0, ge=0.0, le=1.0, description="不确定性 (多采样极差的一半)"
+        0.0, ge=0.0, le=1.0, description="不确定性 (单评分者多采样极差的一半)"
     )
     sample_count: int = Field(1, ge=1, description="评分采样次数")
     duration_ms: float = Field(0.0, description="评分耗时 (毫秒)")
@@ -946,6 +1202,29 @@ class GraderResult(BaseModel):
     subject_only: bool = Field(
         False,
         description="本结论只由被评方自报证据支撑 (需套件显式放行才允许成立)",
+    )
+
+    # ── reward_basis 门结果 (spec: graders 随结论落盘可见) ──
+    gate_factor: float | None = Field(
+        None, description="该判据声明的门因子; None = 非门判据 (历史 run 亦为 None)"
+    )
+    gate_applied: bool = Field(
+        False, description="门因子是否已乘入总分 (仅 multiplicative 且门判为失败时 True)"
+    )
+    gate_reason: str | None = Field(
+        None,
+        description="门的生效/未生效原因 (门失败乘入 / 门通过未乘 / 证据不足未生效 / "
+        "additive 未启用); 判读总分时先看这里",
+    )
+    rater_scores: dict[str, float | None] = Field(
+        default_factory=dict,
+        description="多评分者判据的逐评分者分数 (评分者名 → 分; None = 该评分者本次"
+        "未产出有效判定); 空 = 单评分者。κ/α 由此按 trial 对齐, 是评分者间信度的来源",
+    )
+    rater_ratings: dict[str, str | None] = Field(
+        default_factory=dict,
+        description="多评分者判据的逐评分者判定标签 (pass/fail/None=缺失); "
+        "κ/α 在这个二值判定上计算, 与分数轴分开看",
     )
 
 
@@ -983,6 +1262,57 @@ class ScoreDistribution(BaseModel):
     method: Literal["bootstrap", "insufficient_data"] = "insufficient_data"
 
 
+class DiagnosticMetricResult(BaseModel):
+    """一次诊断指标的计算结果 (spec: llm-metrics 默认仅诊断)。
+
+    刻意与判分结论分型存放: 诊断量不进通过率分子分母、不参与判分聚合 ——
+    它进 grader_results 就等于悄悄改了历史口径。
+    """
+
+    name: str
+    score: float = Field(0.0, ge=0.0, le=1.0, description="分数 0-1; error 非空时无意义")
+    reason: str = ""
+    threshold: float = 0.5
+    details: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = Field(
+        None, description="计算失败原因 (评测侧/配置侧); None = 有效分值"
+    )
+
+
+class DiagnosticMetricSummary(BaseModel):
+    """单个诊断指标在汇总中的分布摘要 (分值 + 分布, 不进任何分母)。"""
+
+    name: str
+    role: MetricRole = MetricRole.DIAGNOSTIC
+    n: int = Field(0, description="有效分值数 (计算失败的 trial 不冒充 0 分)")
+    avg: float | None = None
+    min: float | None = None
+    max: float | None = None
+    p50: float | None = None
+    errors: int = Field(0, description="计算失败的 trial 数")
+
+
+class AgreementReport(BaseModel):
+    """一个判据的跨评分者一致性报告 (spec: statistics κ/α)。
+
+    与单评分者多采样的 ``confidence`` (self-consistency) 是两类量, 呈现上
+    分块不混排。``value=None`` 时 ``reason`` 说明为何不可计算
+    (复用 insufficient_data 语义, 不伪造数值)。
+    """
+
+    measure: Literal["cohen_kappa", "krippendorff_alpha"] | None = Field(
+        None, description="κ = 两评分者无缺失; α = ≥2 评分者或含缺失; None = 不可计算"
+    )
+    value: float | None = Field(None, description="κ/α 值; None = insufficient_data")
+    reason: str | None = Field(None, description="不可计算的原因 (评分者不足/样本过少)")
+    raters: int = Field(0, description="独立评分者数")
+    aligned_samples: int = Field(
+        0, description="对齐样本数 (同一 trial 上 ≥2 个评分者都有有效判定)"
+    )
+    agree: int | None = Field(None, description="完全一致的样本数 (仅 κ 时提供)")
+    disagree: int | None = Field(None, description="存在分歧的样本数 (仅 κ 时提供)")
+
+
 class TrialResult(BaseModel):
     """单次 trial 的完整结果"""
 
@@ -1013,6 +1343,11 @@ class TrialResult(BaseModel):
     unrecognized_attributes: list[str] = Field(
         default_factory=list,
         description="该 trial 的 trace 上翻译表不认识的属性名 (供映射更新)",
+    )
+    diagnostic_results: list[DiagnosticMetricResult] = Field(
+        default_factory=list,
+        description="本 trial 的诊断指标结果 (不进判分与分母); 空 = 未启用诊断指标"
+        "或历史 run (读回为空, 不报错)",
     )
 
     # ── 证据与取信 (spec: extension-contracts / orchestration) ──
@@ -1174,6 +1509,11 @@ class TaskSummary(BaseModel):
         default_factory=list,
         description="通过结论只由被评方自报证据支撑的 trial 索引 (弱证据判定)",
     )
+    diagnostic_metrics: list[DiagnosticMetricSummary] = Field(
+        default_factory=list,
+        description="仅诊断指标的分值与分布摘要 (不进通过率/pass^k/分母/判分聚合); "
+        "历史 run 读回为空",
+    )
 
 
 class RunSummary(BaseModel):
@@ -1219,6 +1559,16 @@ class RunSummary(BaseModel):
     )
     subject_only_trials: int = Field(
         0, description="通过结论只由被评方自报证据支撑的 trial 数 (弱证据判定)"
+    )
+    diagnostic_metrics: list[DiagnosticMetricSummary] = Field(
+        default_factory=list,
+        description="全局诊断指标块 (分值 + 分布摘要; 不进通过率/pass^k/分母/判分聚合); "
+        "历史 run 读回为空",
+    )
+    agreement: dict[str, AgreementReport] = Field(
+        default_factory=dict,
+        description="判据名 → 跨评分者一致性 (κ/α); 与单评分者多采样的 "
+        "self-consistency 分块呈现。历史 run / 单评分者读回为空或带原因",
     )
 
 

@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from agent_eval.core.types import DEFAULT_INVALID_RATIO_LIMIT, RunResult
+from agent_eval.core.types import DEFAULT_INVALID_RATIO_LIMIT, MeasurementContext, RunResult
 from agent_eval.metrics import (
     AnswerRelevancyMetric,
     ContextPrecisionMetric,
@@ -57,6 +57,8 @@ class SyncMetric:
 
     用法边界: 仅限无 running event loop 的同步测试 (notebook 等已有 loop
     的环境不适用); 异步测试取 .async_metric 直接 await measure。
+    0.3.0 宽签名: 入参与异步 Metric.measure 相同, 都是 MeasurementContext
+    (便捷构造用 ``MeasurementContext.of(...)``)。
     """
 
     def __init__(self, metric: Metric):
@@ -75,24 +77,9 @@ class SyncMetric:
     def threshold(self) -> float:
         return self._metric.threshold
 
-    def measure(
-        self,
-        input: str,
-        actual_output: str,
-        expected_output: str | None = None,
-        context: list[str] | None = None,
-        retrieval_context: list[str] | None = None,
-    ) -> MetricResult:
+    def measure(self, ctx: MeasurementContext) -> MetricResult:
         """同步 measure (内部 asyncio.run 桥接异步 Metric.measure)。"""
-        return asyncio.run(
-            self._metric.measure(
-                input=input,
-                actual_output=actual_output,
-                expected_output=expected_output,
-                context=context,
-                retrieval_context=retrieval_context,
-            )
-        )
+        return asyncio.run(self._metric.measure(ctx))
 
 
 def _sync(metric: Metric) -> SyncMetric:

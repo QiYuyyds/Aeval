@@ -12,6 +12,7 @@ capture:                      # 可选, 默认全关: 敏感证据的一套采�
   tool_arguments: false       #   工具入参/结果
   model_content: false        #   模型输入输出正文 (与入参同一套语义, 不是第二个开关)
 capture_tool_arguments: false  # 可选, capture.tool_arguments 的别名写法 (二者写冲突即失败)
+reward_basis: additive         # 可选, suite 级总分合成方式 (task 级可覆盖; 缺省 additive)
 metadata:                     # 可选, 自定义元数据 (任意 JSON)
   author: team-a
   purpose: regression-check
@@ -25,6 +26,8 @@ tasks:                        # 必填, 至少 1 个任务
     max_trials: 3             # 可选, 默认 3 (≥1)
     score_strategy: hybrid    # 可选: all_pass | weighted | hybrid (默认)
     score_threshold: 0.7      # 可选, 0.0-1.0
+    reward_basis: additive    # 可选: additive (默认) | multiplicative; None = 继承 suite
+    diagnostic_metrics: []    # 可选, 仅诊断运行的指标名 (进诊断块, 不进任何分母)
     tags: [http, regression]  # 可选, 默认 []; 去空白后不得为空或重复
     category: tools           # 可选, 任务类别 (呈现/分组用)
     difficulty: easy          # 可选: easy | medium | hard (仅呈现, 不参与计分)
@@ -48,6 +51,7 @@ tasks:                        # 必填, 至少 1 个任务
         name: code_based
         evidence: [harness, runner]  # 可选, 默认即此: 本判据允许消费的来源级别
         allow_subject: false         # 可选, 打开才允许「仅被评方自报」支撑通过
+        gate: { factor: 0.0 }        # 可选, 门声明: 乘性合成时失败按因子塌缩总分
         config:
           checks:
             - type: contains
@@ -60,6 +64,12 @@ tasks:                        # 必填, 至少 1 个任务
         config:
           expectations:
             - { type: file_exists, path: "answer.txt" }
+      # 多评分者判据 (可选): ≥2 个独立 judge 定义跑同一批 trial → 汇总报 κ/α
+      # - type: model
+      #   name: panel
+      #   judges:
+      #     - { name: judge-a, config: { model: gpt-x } }
+      #     - { name: judge-b, config: { model: other-model } }
 ```
 
 ## 校验规则一览
@@ -139,3 +149,27 @@ tasks:                        # 必填, 至少 1 个任务
 - 最小离线示例：`examples/minimal/suite.yaml`
 - HTTP Agent 接入示例：`examples/achat/suite.yaml`
 - AChat 真实链路套件：AChat 仓库 `backend/eval_suites/first-suite.yaml`
+
+## 门与乘性合成：`gate` / `reward_basis`（0.3.0）
+
+**`reward_basis`**（task 级必填与否皆可，None = 继承 suite；suite 级默认 `additive`）：
+
+- `additive`（默认）：合成与 0.2.0 逐位一致。判据声明了 `gate` 也只是随结论落盘并标注「未启用」，不改变任何分数。
+- `multiplicative`：总分 = 基础分 × ∏(生效门因子)。基础分由非门判据按既有 `score_strategy` 语义合成；门判为失败时其因子乘入总分（`factor: 0.0` 的硬门失败 → 总分 0），门通过不乘。门未生效（证据级别不满足 / 证据缺失 → 结论 invalid）**不乘任何因子**并在结论标注原因 —— 评测侧没取到证据不得折成被评方的失败。
+
+**`gate`**（判据级，`{ factor: 0.0-1.0 }`）：把该判据声明为门。
+
+校验规则一览（装配期 / 加载期报错）：
+
+| 规则 | 错误文案要点 |
+|------|--------------|
+| `gate.factor ∈ [0, 1]` | 因子越界直接拒绝 |
+| 门判据不得 `allow_subject: true` | subject 级自报证据不得触发门 |
+| `reward_basis: multiplicative` 时每个 task 至少一个非门判据 | 门因子只能塌缩总分，不能构成基础分 |
+| `judges` 评分者名不得重复 | 多评分者判据的名字即 κ/α 的键 |
+
+**`judges`**（判据级，≥2 个定义 = 多评分者判据）：每个定义对同一批 trial 独立评分（`config` 覆盖判据 config 的同名字段，如 model / prompt），首个定义为基准结论。汇总按 trial 对齐后报告 Cohen's κ（两评分者无缺失）或 Krippendorff's α（≥2 评分者或含缺失）；对齐样本少于 `min_aligned_ratings_for_agreement`（默认 5，见 `/v1/meta`）时标注不可计算，不伪造数值。**单评分者多采样的 `confidence` 是自一致（self-consistency），与 κ/α 分块呈现。**
+
+## 诊断指标：`diagnostic_metrics`（0.3.0）
+
+task 级声明仅诊断运行的指标名（从 runner 的 `metrics_registry` 解析）。其分值与分布摘要进入汇总的诊断块（CLI 默认折叠、`--verbose` 展开；报告同理），**不进通过率、pass^k、任何分母与判分聚合** —— 启用与否不改变历史口径。被本 task 判据显式引用（`type: metric`）的指标视为已升格，不再重复诊断运行。

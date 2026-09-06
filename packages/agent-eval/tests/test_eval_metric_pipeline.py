@@ -14,6 +14,7 @@ from agent_eval.core.types import (
     GraderConfig,
     GraderType,
     InvalidReason,
+    MeasurementContext,
     ScoreStrategy,
     TrialEvidence,
     TrialVerdict,
@@ -33,16 +34,15 @@ class StubMetric(Metric):
         self.score = score
         self.measure_calls: list[dict] = []
 
-    async def measure(self, input, actual_output, expected_output=None,
-                      context=None, retrieval_context=None) -> MetricResult:
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
         self.measure_calls.append({
-            "input": input, "actual_output": actual_output,
+            "input": ctx.prompt, "actual_output": ctx.actual_output,
         })
         return MetricResult(
             name=self.name,
             score=self.score,
             reason="stub reason",
-            details={"input_echo": input},
+            details={"input_echo": ctx.prompt},
             threshold=self.threshold,
         )
 
@@ -186,8 +186,7 @@ class UncalculableStubMetric(StubMetric):
 
     name = "uncalculable_metric"
 
-    async def measure(self, input, actual_output, expected_output=None,
-                      context=None, retrieval_context=None) -> MetricResult:
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
         return MetricResult(
             name=self.name,
             score=0.0,
@@ -321,7 +320,7 @@ async def test_llm_fn_injected_into_unconfigured_metrics():
             self.llm_fn = None
             self.calls = 0
 
-        async def measure(self, input, actual_output, **kwargs) -> MetricResult:
+        async def measure(self, ctx: MeasurementContext) -> MetricResult:
             self.calls += 1
             assert self.llm_fn is not None  # runner 注入先于 measure
             return MetricResult(name=self.name, score=0.8, reason="ok")

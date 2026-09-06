@@ -154,6 +154,11 @@ def _pass1(summary_or_task) -> float | None:
     return None if value is None else float(value)
 
 
+def _num(value: float | None) -> str:
+    """诊断分布数值; None = 无有效分值 (不冒充 0)。"""
+    return "n/a" if value is None else f"{value:.4f}"
+
+
 def _resolve_agent_runner(name: str | None):
     """解析 AgentRunner: --runner > AEVAL_RUNNER > 内置 mock。
 
@@ -199,8 +204,11 @@ def _trace_provider_for(agent_runner):
     return MockTraceProvider()
 
 
-def _print_run_summary(run) -> None:
-    """§11.2 形态的汇总输出 (无 emoji, 兼容非 UTF-8 终端)。"""
+def _print_run_summary(run, verbose: bool = False) -> None:
+    """§11.2 形态的汇总输出 (无 emoji, 兼容非 UTF-8 终端)。
+
+    诊断块默认折叠为一行 (诊断量不进分母, 也不抢判分量的视线); --verbose 展开。
+    """
     summary = run.summary
     typer.echo(LINE)
     typer.echo("Results Summary")
@@ -231,6 +239,43 @@ def _print_run_summary(run) -> None:
     else:
         typer.echo(f"  Avg Score: {INSUFFICIENT_LABEL}")
     typer.echo(f"  Tasks: {summary.total_tasks}  Trials: {summary.total_trials}")
+
+    # 诊断块 (折叠/展开) 与跨评分者一致性分块呈现, 不与判分量混排
+    diagnostics = getattr(summary, "diagnostic_metrics", None) or []
+    if diagnostics:
+        if verbose:
+            typer.echo("")
+            typer.echo("  Diagnostics (not in any denominator):")
+            for d in diagnostics:
+                typer.echo(
+                    f"    - {d.name}: n={d.n} avg={_num(d.avg)} min={_num(d.min)} "
+                    f"max={_num(d.max)} p50={_num(d.p50)}"
+                    + (f" errors={d.errors}" if d.errors else "")
+                )
+        else:
+            typer.echo(
+                f"  Diagnostics: {len(diagnostics)} metric(s) "
+                "(not in any denominator; use --verbose to expand)"
+            )
+    agreement = getattr(summary, "agreement", None) or {}
+    if agreement:
+        typer.echo("")
+        typer.echo(
+            "  Inter-rater agreement (single-rater multi-sample confidence is "
+            "self-consistency, not inter-rater reliability):"
+        )
+        for name, report in agreement.items():
+            value = (
+                f"{report.value:.4f}"
+                if report.value is not None
+                else f"{INSUFFICIENT_LABEL} ({report.reason or 'n/a'})"
+            )
+            pair = (
+                f"  agree/disagree: {report.agree}/{report.disagree}"
+                if report.agree is not None
+                else ""
+            )
+            typer.echo(f"    - {name}: {report.measure} = {value}{pair}")
 
     if summary.failures:
         typer.echo("")
@@ -302,6 +347,11 @@ def run(
             "(评测可信度问题, 非 agent 表现)"
         ),
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="展开诊断指标块 (默认折叠: 诊断量不进分母, 一行提示)",
+    ),
 ) -> None:
     """加载并执行 suite, 打印汇总。
 
@@ -343,11 +393,16 @@ def run(
     agent_runner = _resolve_agent_runner(runner)
     storage = _build_storage(db)
 
+    # 内置指标注册表同源装配 (与 metric grader / 诊断指标同一注入约定):
+    # llm_fn 未配置时被引用的 LLM 指标返回明确配置错误, 不 crash run
+    from agent_eval.metrics import build_default_metrics_registry
+
     eval_runner = EvalRunner(
         agent_runner=agent_runner,
         trace_provider=_trace_provider_for(agent_runner),
         storage=storage,
         trace_mapping=trace_mapping,
+        metrics_registry=build_default_metrics_registry(),
         **({"concurrency": concurrency} if concurrency else {}),
     )
 
@@ -382,7 +437,7 @@ def run(
                    f"{run_result.error}", err=True)
         raise typer.Exit(code=1)
 
-    _print_run_summary(run_result)
+    _print_run_summary(run_result, verbose=verbose)
 
     summary = run_result.summary
     if summary is None:

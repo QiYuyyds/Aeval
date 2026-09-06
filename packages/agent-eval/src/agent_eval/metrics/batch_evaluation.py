@@ -16,7 +16,8 @@ import asyncio
 
 from pydantic import BaseModel, Field
 
-from agent_eval.metrics.base import Metric
+from agent_eval.core.types import MeasurementContext
+from agent_eval.metrics.base import Metric, assert_measurement_signature
 from agent_eval.metrics.llm_judge import LLMFn, require_llm_fn
 
 DEFAULT_CONCURRENCY = 4
@@ -113,6 +114,9 @@ class BatchEvaluator:
         concurrency: int = DEFAULT_CONCURRENCY,
     ):
         self.metrics_registry = dict(metrics_registry or {})
+        for metric in self.metrics_registry.values():
+            # 装配期拒绝旧五字符串签名 (spec: 旧签名不被接受)
+            assert_measurement_signature(metric)
         self.llm_fn = llm_fn
         self.concurrency = max(1, concurrency)
         if self.llm_fn is not None:
@@ -213,11 +217,13 @@ class BatchEvaluator:
         """单条单指标计算; 异常记入该条结果 (score=0 + error), 不中断整批。"""
         try:
             result = await metric.measure(
-                input=case.input,
-                actual_output=case.actual_output,
-                expected_output=case.expected_output,
-                context=case.context,
-                retrieval_context=case.retrieval_context,
+                MeasurementContext.of(
+                    input=case.input,
+                    actual_output=case.actual_output,
+                    expected_output=case.expected_output,
+                    context=case.context,
+                    retrieval_context=case.retrieval_context,
+                )
             )
         except asyncio.CancelledError:
             raise

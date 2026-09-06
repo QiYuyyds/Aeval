@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_eval.core.types import MeasurementContext
 from agent_eval.metrics.base import BaseLLMMetric, MetricError, MetricResult
 
 
@@ -32,15 +33,8 @@ class FaithfulnessMetric(BaseLLMMetric):
   "reason": "一句话理由 (标注不被支持的陈述)"
 }"""
 
-    async def measure(
-        self,
-        input: str,
-        actual_output: str,
-        expected_output: str | None = None,
-        context: list[str] | None = None,
-        retrieval_context: list[str] | None = None,
-    ) -> MetricResult:
-        context = [c for c in (context or []) if str(c).strip()]
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        context = [c for c in (ctx.context or []) if str(c).strip()]
         if not context:
             # 缺参明确失败路径: 返回 score=0 与明确理由 (不猜、不静默)
             return MetricResult(
@@ -52,7 +46,7 @@ class FaithfulnessMetric(BaseLLMMetric):
             )
 
         context_str = "\n---\n".join(str(c) for c in context)
-        user_prompt = f"上下文:\n{context_str}\n\nAgent 回答:\n{actual_output}"
+        user_prompt = f"上下文:\n{context_str}\n\nAgent 回答:\n{ctx.actual_output}"
         data = await self._llm_judge(self._SYSTEM_PROMPT, user_prompt)
 
         if "score" not in data:

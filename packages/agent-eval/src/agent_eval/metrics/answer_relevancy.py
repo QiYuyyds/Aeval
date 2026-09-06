@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_eval.core.types import MeasurementContext
 from agent_eval.metrics.base import BaseLLMMetric, MetricError, MetricResult
 
 
@@ -30,15 +31,8 @@ class AnswerRelevancyMetric(BaseLLMMetric):
   "reason": "一句话理由"
 }"""
 
-    async def measure(
-        self,
-        input: str,
-        actual_output: str,
-        expected_output: str | None = None,
-        context: list[str] | None = None,
-        retrieval_context: list[str] | None = None,
-    ) -> MetricResult:
-        user_prompt = f"用户问题: {input}\n\nAgent 回答: {actual_output}"
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        user_prompt = f"用户问题: {ctx.prompt}\n\nAgent 回答: {ctx.actual_output}"
         data = await self._llm_judge(self._SYSTEM_PROMPT, user_prompt)
 
         if "score" not in data:

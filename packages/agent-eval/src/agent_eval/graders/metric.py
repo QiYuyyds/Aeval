@@ -36,7 +36,10 @@ from agent_eval.metrics.base import (
 )
 from agent_eval.metrics.base import (
     Metric,
+    build_measurement_context,
+    metric_declaration,
     metric_failure_reason,
+    metric_role,
     uncalculable_metric_result,
 )
 from agent_eval.metrics.llm_judge import LLMFn
@@ -56,6 +59,11 @@ class MetricGrader:
         llm_fn: LLMFn | None = None,
     ):
         # 由 EvalRunner 组合根覆盖注入 (与 storage 注入同一模式)
+        from agent_eval.metrics.base import assert_measurement_signature
+
+        for metric in (metrics_registry or {}).values():
+            # 装配期拒绝旧五字符串签名 (spec: 旧签名不被接受, 不静默降级)
+            assert_measurement_signature(metric)
         self.metrics_registry: dict[str, Metric] = dict(metrics_registry or {})
         self.llm_fn = llm_fn
 
@@ -76,18 +84,30 @@ class MetricGrader:
 
         metric = self.metrics_registry.get(metric_name)
         if metric is None:
+            # 错误文案列出已注册指标: 升格 (判据引用指标为判分量) 拼错名在这里可诊断
+            registered = ", ".join(sorted(self.metrics_registry)) or "(空)"
             return self._result(
                 config,
                 0.0,
                 False,
-                f"未知指标: {metric_name} (未在 metrics_registry 注册)",
+                f"未知指标: {metric_name} (未在 metrics_registry 注册; "
+                f"已注册: {registered})",
                 verdict=TrialVerdict.INVALID,
                 invalid_reason=InvalidReason.UNKNOWN_GRADER,
             )
 
-        kwargs = self._measure_kwargs(config, trial)
+        # 判据取信级别已由 runner 的 _context_for 在证据视图上收紧; 指标通道声明
+        # 在其上二次裁剪 (未声明通道不交付) —— 两边都同意才算数
+        evidence = context.evidence if context is not None else None
+        ctx = build_measurement_context(
+            metric,
+            task_id=task.id,
+            trial=trial,
+            config=config.config,
+            evidence=evidence,
+        )
         try:
-            result = await metric.measure(**kwargs)
+            result = await metric.measure(ctx)
         except _CALC_ERRORS as e:
             return self._result(
                 config,
@@ -116,6 +136,8 @@ class MetricGrader:
             )
 
         threshold = float(config.config.get("threshold", metric.threshold))
+        role = metric_role(metric)
+        declaration = metric_declaration(metric)
         return self._result(
             config,
             result.score,
@@ -127,6 +149,9 @@ class MetricGrader:
                 "metric_threshold": result.threshold,
                 "grader_threshold": threshold,
                 "grader_version": implementation_version_of(self),
+                # 升格判据的结论携带指标的目录角色与取信声明 (spec: llm-metrics)
+                "metric_role": role.value,
+                "metric_evidence_declaration": declaration.described(),
             },
             evidence_levels=consulted_levels(
                 context.evidence if context is not None else None, "transcript"
@@ -154,22 +179,6 @@ class MetricGrader:
         if config.name != MetricGrader.name:
             return config.name
         return ""
-
-    @staticmethod
-    def _measure_kwargs(config: GraderConfig, trial: TrialResult) -> dict[str, Any]:
-        """从 trial transcript 与 grader config 提取 measure() 入参"""
-        first = trial.transcript[0] if trial.transcript else {}
-        last = trial.transcript[-1] if trial.transcript else {}
-        prompt = first.get("content", "") if isinstance(first, dict) else ""
-        output = last.get("content", "") if isinstance(last, dict) else ""
-
-        return {
-            "input": prompt,
-            "actual_output": output,
-            "expected_output": config.config.get("expected_output"),
-            "context": config.config.get("context"),
-            "retrieval_context": config.config.get("retrieval_context"),
-        }
 
     @staticmethod
     def _result(

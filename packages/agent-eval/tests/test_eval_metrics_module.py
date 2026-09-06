@@ -2,6 +2,7 @@
 
 import pytest
 
+from agent_eval.core.types import MeasurementContext
 from agent_eval.dataset.sources.manual import DatasetImportError
 from agent_eval.metrics import (
     AnswerRelevancyMetric,
@@ -83,7 +84,7 @@ class TestAnswerRelevancy:
             statements=["s1", "s2"], relevancies=[1.0, 0.7],
         ))
         result = await AnswerRelevancyMetric(llm_fn=stub).measure(
-            input="什么是退款政策？", actual_output="退款政策是……"
+            MeasurementContext.of(input="什么是退款政策？", actual_output="退款政策是……")
         )
         assert isinstance(result, MetricResult)
         assert result.name == "answer_relevancy"
@@ -94,26 +95,26 @@ class TestAnswerRelevancy:
 
     async def test_score_clamped(self):
         stub = StubJudge(judge_json_response(1.7))
-        result = await AnswerRelevancyMetric(llm_fn=stub).measure("q", "a")
+        result = await AnswerRelevancyMetric(llm_fn=stub).measure(MeasurementContext.of("q", "a"))
         assert result.score == 1.0
         assert result.success is True
 
     async def test_threshold_boundary(self):
         stub = StubJudge(judge_json_response(0.5))
         metric = AnswerRelevancyMetric(llm_fn=stub, threshold=0.5)
-        assert (await metric.measure("q", "a")).success is True
+        assert (await metric.measure(MeasurementContext.of("q", "a"))).success is True
 
     async def test_non_numeric_score_raises_instead_of_zero(self):
         """score 字段存在但非数值 → 解析失败, 不静默折成 agent 的 0 分 (任务 1.5)"""
         stub = StubJudge(judge_json_response("很高"))
         with pytest.raises(MetricError, match="not a number"):
-            await AnswerRelevancyMetric(llm_fn=stub).measure("q", "a")
+            await AnswerRelevancyMetric(llm_fn=stub).measure(MeasurementContext.of("q", "a"))
 
 
 class TestFaithfulness:
     async def test_missing_context_fails_explicitly(self):
         stub = StubJudge(judge_json_response(1.0))
-        result = await FaithfulnessMetric(llm_fn=stub).measure("q", "an answer")
+        result = await FaithfulnessMetric(llm_fn=stub).measure(MeasurementContext.of("q", "an answer"))
         # 不调用 LLM、score=0、理由明确
         assert stub.calls == []
         assert result.score == 0.0
@@ -129,8 +130,7 @@ class TestFaithfulness:
         ))
         metric = FaithfulnessMetric(llm_fn=stub, threshold=0.7)
         result = await metric.measure(
-            "q", "an answer with hallucination",
-            context=["doc1", "doc2"],
+            MeasurementContext.of("q", "an answer with hallucination", context=["doc1", "doc2"]),
         )
         assert result.score == 0.5
         assert result.success is False  # 0.5 < threshold 0.7
@@ -143,11 +143,11 @@ class TestFaithfulness:
 
         stub = StubJudge('{"claims": ["c1"]}')  # 无 score
         with pytest.raises(MetricError):
-            await FaithfulnessMetric(llm_fn=stub).measure("q", "a", context=["doc"])
+            await FaithfulnessMetric(llm_fn=stub).measure(MeasurementContext.of("q", "a", context=["doc"]))
 
     async def test_missing_llm_fn_raises(self):
         with pytest.raises(LLMNotConfiguredError):
-            await FaithfulnessMetric(llm_fn=None).measure("q", "a", context=["doc"])
+            await FaithfulnessMetric(llm_fn=None).measure(MeasurementContext.of("q", "a", context=["doc"]))
 
 
 class TestContextRecall:
@@ -155,9 +155,9 @@ class TestContextRecall:
         stub = StubJudge(judge_json_response(1.0))
         metric = ContextRecallMetric(llm_fn=stub)
 
-        no_expected = await metric.measure("q", "a", retrieval_context=["doc"])
+        no_expected = await metric.measure(MeasurementContext.of("q", "a", retrieval_context=["doc"]))
         assert no_expected.score == 0.0 and "expected_output" in no_expected.reason
-        no_retrieval = await metric.measure("q", "a", expected_output="exp")
+        no_retrieval = await metric.measure(MeasurementContext.of("q", "a", expected_output="exp"))
         assert no_retrieval.score == 0.0 and "retrieval_context" in no_retrieval.reason
         assert stub.calls == []  # 缺参不调用 LLM
 
@@ -167,7 +167,7 @@ class TestContextRecall:
             information_points=["p1", "p2", "p3"], covered=[True, True, False],
         ))
         result = await ContextRecallMetric(llm_fn=stub).measure(
-            "q", "a", expected_output="期望答案", retrieval_context=["doc1", "doc2"],
+            MeasurementContext.of("q", "a", expected_output="期望答案", retrieval_context=["doc1", "doc2"]),
         )
         assert result.score == 0.75
         assert result.details["covered"] == [True, True, False]
@@ -176,7 +176,7 @@ class TestContextRecall:
 class TestContextPrecision:
     async def test_missing_retrieval_context_fails_explicitly(self):
         stub = StubJudge(judge_json_response(1.0))
-        result = await ContextPrecisionMetric(llm_fn=stub).measure("q", "a")
+        result = await ContextPrecisionMetric(llm_fn=stub).measure(MeasurementContext.of("q", "a"))
         assert stub.calls == []
         assert result.score == 0.0
         assert "retrieval_context" in result.reason
@@ -187,7 +187,7 @@ class TestContextPrecision:
             documents=[{"index": 0, "relevant": True}, {"index": 1, "relevant": False}],
         ))
         result = await ContextPrecisionMetric(llm_fn=stub).measure(
-            "q", "a", retrieval_context=["doc0", "doc1", "doc2"],
+            MeasurementContext.of("q", "a", retrieval_context=["doc0", "doc1", "doc2"]),
         )
         assert result.score == 0.67
         assert result.details["documents"][0]["relevant"] is True

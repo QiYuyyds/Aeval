@@ -134,6 +134,28 @@ class MyAgentRunner:
 5. **`cost_usd` 需要价目表**。框架不内置任何价格数据：没有配置价目表时成本报告为
    「不可计算」（带原因），不会用猜测的单价折算。
 
+## 升级到 0.3.0（从 0.2.x）
+
+0.3.0 的破坏点集中在**指标作者**一侧；只写套件、不写自定义指标的升级即用。
+
+1. **`Metric.measure()` 签名断裂（不留 legacy 旗标）**。旧五字符串签名
+   `measure(input, actual_output, expected_output, context, retrieval_context)`
+   被移除，新签名是 `measure(ctx: MeasurementContext) -> MetricResult` ——
+   旧签名指标在注册/注入时（装配期）即报错并说明新签名形状。逐字段对照表与
+   迁移写法见 [接入指南 §11](./integration-guide.md)。
+2. **`confidence` 语义澄清（不改数据）**。单评分者多采样得到的
+   `confidence = 1 - uncertainty` 是**同一 judge 的自一致（self-consistency）**，
+   不是评分者间信度。跨评分者信度是新字段：判据配置 ≥2 个独立 `judges` 后，
+   run 汇总的 `agreement` 块报告 Cohen's κ / Krippendorff's α（评分者不足或
+   对齐样本过少时为 `None` + 原因），与 confidence 分块呈现、不混排。
+3. **诊断块不改变历史口径**。task 级 `diagnostic_metrics` 启用的指标只进报告的
+   诊断块（CLI / 报告默认折叠，`--verbose` 展开），不进通过率、pass^k、任何分母
+   与判分聚合 —— `statistics_version` 维持 2，新旧 run 的分母语义可比。历史 run
+   汇总读回时诊断块为空、κ/α 为 `None`、门字段缺省，不报错。
+4. **门是显式 opt-in**。不声明 `gate` / `reward_basis` 的套件分数与 0.2.0 逐位
+   一致；声明了门判据而 `reward_basis` 为 additive（默认）时，门声明只随结论
+   落盘并标注「未启用」。语法见 [YAML 格式](./yaml-format.md)。
+
 ## 下一步
 
 - [YAML 格式](./yaml-format.md) — 套件怎么写

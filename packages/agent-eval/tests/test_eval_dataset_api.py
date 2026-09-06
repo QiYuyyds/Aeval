@@ -15,7 +15,7 @@ import pytest_asyncio
 from agent_eval.api.app import create_app as create_eval_app
 from agent_eval.core.contract import TrialSession
 from agent_eval.core.runner import EvalRunner
-from agent_eval.core.types import TaskView, TrialEvidence
+from agent_eval.core.types import MeasurementContext, TaskView, TrialEvidence
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
 from agent_eval.metrics.base import Metric, MetricResult
 from agent_eval.storage.memory import MemoryStorage
@@ -32,8 +32,8 @@ class ScriptedMetric(Metric):
     name = "stub_metric"
     threshold = 0.6
 
-    async def measure(self, input, actual_output, **kwargs) -> MetricResult:
-        score = 0.9 if "fine" in (actual_output or "") else 0.0
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        score = 0.9 if "fine" in (ctx.actual_output or "") else 0.0
         return MetricResult(name=self.name, score=score, reason="scripted", threshold=self.threshold)
 
 

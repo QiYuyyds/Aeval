@@ -11,4 +11,4 @@ Usage:
     result = await runner.run_suite(suite)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

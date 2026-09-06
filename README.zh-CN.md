@@ -17,6 +17,7 @@
 - **REST API 与 SSE** — 可挂载进任意 FastAPI 应用，也可独立服务（`/v1` 前缀），支持运行事件流。
 - **CLI** — `eval-suite run / validate / list / show / compare / serve`。
 - **数据集与 LLM 指标** — 从 trace 构建数据集、回填套件，并用 RAG 质量指标（answer relevancy / faithfulness / context recall·precision）给输出打分。
+- **证据感知指标与跨评分者一致性** — 指标经证据感知的 `MeasurementContext` 测量：声明自己消费的通道（transcript / steps / harness·subject 状态），未声明的读不到，交付的每条观测带来源分级与采集时刻；声明轨迹通道的 judge 能看到完整轨迹；轨迹类指标默认仅诊断（显式升格前不进任何分母）；硬性安全判据可声明为乘性**门**，失败按乘子塌缩总分而不是被平均稀释；同一判据配置两个独立 judge 即可报告 Cohen's κ / Krippendorff's α，与单评分者多采样的自一致明确分开呈现。
 
 ## 安装
 

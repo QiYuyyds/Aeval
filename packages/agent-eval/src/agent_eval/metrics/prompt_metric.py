@@ -13,7 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_eval.metrics.base import Metric, MetricResult
+from agent_eval.core.types import MeasurementContext
+from agent_eval.metrics.base import Metric, MetricResult, assert_measurement_signature
 from agent_eval.metrics.llm_judge import LLMFn, require_llm_fn
 
 
@@ -70,6 +71,9 @@ class PromptMetric:
             raise ValueError("PromptMetric requires at least one variant")
         if not metrics:
             raise ValueError("PromptMetric requires at least one metric")
+        for metric in metrics:
+            # 装配期拒绝旧五字符串签名 (spec: 旧签名不被接受)
+            assert_measurement_signature(metric)
         self.variants = list(variants)
         self.metrics = list(metrics)
         self.llm_fn = llm_fn
@@ -100,8 +104,7 @@ class PromptMetric:
                 detail = PromptTrialDetail(output=output)
                 for metric in self.metrics:
                     result: MetricResult = await metric.measure(
-                        input=prompt,
-                        actual_output=output,
+                        MeasurementContext.of(input=prompt, actual_output=output)
                     )
                     detail.scores[metric.name] = result.score
                 trials.append(detail)

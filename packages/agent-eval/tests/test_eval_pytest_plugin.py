@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import agent_eval
+from agent_eval.core.types import MeasurementContext
 from agent_eval.metrics.base import MetricResult
 from agent_eval.metrics.llm_judge import LLMNotConfiguredError
 
@@ -38,7 +39,7 @@ class TestFixtures:
         """同步 fixture 直接 measure — 无事件循环管理, 返回 MetricResult。"""
         answer_relevancy.async_metric.llm_fn = _stub_llm(0.9)
         result = answer_relevancy.measure(
-            input="什么是退款政策？", actual_output="30 天内可退货"
+            MeasurementContext.of(input="什么是退款政策？", actual_output="30 天内可退货")
         )
         assert isinstance(result, MetricResult)
         assert result.name == "answer_relevancy"
@@ -49,7 +50,7 @@ class TestFixtures:
     async def test_async_metric_direct_await(self, answer_relevancy):
         """异步测试取原始对象直接 await (不与 pytest-asyncio 抢 loop)。"""
         answer_relevancy.async_metric.llm_fn = _stub_llm(0.4)
-        result = await answer_relevancy.async_metric.measure("q", "a")
+        result = await answer_relevancy.async_metric.measure(MeasurementContext.of("q", "a"))
         assert isinstance(result, MetricResult)
         assert result.score == 0.4
         assert result.success is False
@@ -64,13 +65,13 @@ class TestFixtures:
         metric = eval_metrics["faithfulness"]
         assert metric.name == "faithfulness"
         metric.async_metric.llm_fn = _stub_llm(1.0)
-        result = metric.measure(input="q", actual_output="a", context=["doc"])
+        result = metric.measure(MeasurementContext.of("q", "a", context=["doc"]))
         assert isinstance(result, MetricResult)
         assert result.score == 1.0
 
     def test_missing_llm_config_error_is_readable(self, faithfulness):
         with pytest.raises(LLMNotConfiguredError) as exc:
-            faithfulness.measure("q", "a", context=["doc"])
+            faithfulness.measure(MeasurementContext.of("q", "a", context=["doc"]))
         assert "llm_fn" in str(exc.value)
         assert "inject" in str(exc.value)  # 提示如何修复
 
@@ -86,7 +87,7 @@ class TestFixtures:
         ]
         for wrapper, kwargs in cases:
             wrapper.async_metric.llm_fn = stub
-            result = wrapper.measure(input="q", actual_output="a", **kwargs)
+            result = wrapper.measure(MeasurementContext.of("q", "a", **kwargs))
             assert isinstance(result, MetricResult)
             assert result.score == 0.8
             assert result.success is True

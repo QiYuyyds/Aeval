@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from agent_eval.api.routes import datasets, graders, metrics, runs, suites, tasks
+from agent_eval.core.metrics import MIN_ALIGNED_RATINGS_FOR_AGREEMENT
 from agent_eval.core.runner import EvalRunner
 from agent_eval.core.types import (
     DEFAULT_BOOTSTRAP_ROUNDS,
@@ -82,6 +83,7 @@ def statistics_defaults() -> dict[str, Any]:
         "bootstrap_rounds": DEFAULT_BOOTSTRAP_ROUNDS,
         "min_valid_trials_for_saturation": MIN_VALID_TRIALS_FOR_SATURATION,
         "gate_invalid_ratio_limit": DEFAULT_INVALID_RATIO_LIMIT,
+        "min_aligned_ratings_for_agreement": MIN_ALIGNED_RATINGS_FOR_AGREEMENT,
     }
 
 
@@ -131,6 +133,11 @@ def meta_payload(
             "cost_axis": True,
             "evidence_provenance_levels": True,
             "deferred_grading": True,
+            # ④ agent 指标目录: 证据感知测量上下文 / 诊断-判分角色轴 / κ/α / 门
+            "evidence_aware_metrics": True,
+            "metric_roles": ["diagnostic", "judging"],
+            "inter_rater_agreement": ["cohen_kappa", "krippendorff_alpha"],
+            "reward_basis_gates": True,
             # 重评分本期只有库层入口 (EvalRunner.regrade_run)。它牵涉同一大版本的
             # 响应结构兼容承诺, 暴露面另立变更 —— 列出来免得调用方以为 /runs 上能调。
             "regrade_over_http": False,

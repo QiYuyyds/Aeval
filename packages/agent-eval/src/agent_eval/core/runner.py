@@ -42,6 +42,7 @@ from agent_eval.core.contract import (
 from agent_eval.core.metrics import (
     ProcessMetrics,
     aggregate_metrics,
+    agreement_report,
     classify_trial,
     estimates_to_rates,
     extract_process_metrics,
@@ -50,6 +51,7 @@ from agent_eval.core.metrics import (
     merge_termination_distributions,
     pass_at_k,
     pass_power_k,
+    percentile,
     split_trials_by_verdict,
     summarize_resources,
     summarize_scores,
@@ -65,7 +67,10 @@ from agent_eval.core.types import (
     DEFAULT_CONFIDENCE_LEVEL,
     MIN_VALID_TRIALS_FOR_SATURATION,
     STATISTICS_VERSION,
+    AgreementReport,
     CaptureDecision,
+    DiagnosticMetricResult,
+    DiagnosticMetricSummary,
     EvalSuite,
     EvalTask,
     EvidenceBoundary,
@@ -76,9 +81,11 @@ from agent_eval.core.types import (
     GraderResult,
     GraderType,
     InvalidReason,
+    MetricRole,
     Observation,
     ObservedBy,
     PassKEstimate,
+    RewardBasis,
     RunResult,
     RunSummary,
     ScoreStrategy,
@@ -96,7 +103,12 @@ from agent_eval.graders._evidence import (
     enforce_evidence_policy,
     implementation_version_of,
 )
-from agent_eval.metrics.base import Metric
+from agent_eval.metrics.base import (
+    Metric,
+    assert_measurement_signature,
+    build_measurement_context,
+    metric_role,
+)
 from agent_eval.metrics.llm_judge import LLMFn
 from agent_eval.storage import MemoryStorage
 from agent_eval.trace import PhoenixProvider
@@ -314,6 +326,9 @@ class EvalRunner:
         self.verify_environment = verify_environment
         self.enable_grader_cache = enable_grader_cache
         self.metrics_registry: dict[str, Metric] = dict(metrics_registry or {})
+        for metric in self.metrics_registry.values():
+            # 装配期拒绝旧五字符串签名 (spec: 旧签名不被接受, 不静默降级)
+            assert_measurement_signature(metric)
         self.llm_fn = llm_fn
         self.confidence_level = confidence_level
         self.bootstrap_rounds = max(1, bootstrap_rounds)
@@ -346,6 +361,10 @@ class EvalRunner:
             for metric in self.metrics_registry.values():
                 if getattr(metric, "llm_fn", None) is None:
                     metric.llm_fn = self.llm_fn
+        # 脱敏钩子注入未自行配置的指标 (judge 轨迹注入提示词前应用)
+        for metric in self.metrics_registry.values():
+            if getattr(metric, "redactor", None) is None:
+                metric.redactor = self.redactor
 
         # Grader 结果缓存 (按 run 分桶: 删除 run 时其派生结果一并失效)
         self._grader_cache: dict[str, dict[str, GraderResult]] = {}
@@ -386,7 +405,9 @@ class EvalRunner:
             await self.storage.save_suite(suite)
             await self.storage.save_run(run)
 
-            for task in suite.tasks:
+            for task_original in suite.tasks:
+                # suite 级 reward_basis 下渗为 task 生效值 (不改调用方的套件对象)
+                task = self._effective_task(task_original, suite)
                 if self._cancel_flags.get(run.run_id, False):
                     # 取消后不再启动的 task: trial 仍要留痕, 否则「大面积取消」
                     # 只会表现为样本变少而不是评测没跑完
@@ -538,7 +559,7 @@ class EvalRunner:
         # 重评要真跑一遍判分, 否则拿到的还是当场那份缓存结论
         self._grader_cache.pop(run_id, None)
         for task_id, trials in run.trials.items():
-            task = tasks_by_id[task_id]
+            task = self._effective_task(tasks_by_id[task_id], suite)
             for trial in trials:
                 if not trial.grader_results:
                     continue
@@ -1188,6 +1209,8 @@ class EvalRunner:
         )
         trial = await self._grade_trial(trial, observations.source_spans, task, context)
         trial.weakest_evidence = self._weakest_support(trial)
+        # 诊断指标 (未升格的) 在判分之后单独测量: 不进判分流程, 不碰 grader_results
+        trial.diagnostic_results = await self._measure_diagnostic_metrics(task, trial)
         # 当场的这次判定也要进历史: 「原结论 vs 重评结论」并列的前提是原结论被记下
         await self._record_attempt(run_id, task.id, trial, triggered_by=triggered_by)
         return trial
@@ -1271,6 +1294,7 @@ class EvalRunner:
         5. sample_count == 1 且缓存开启 → prompt-hash 结果缓存
         """
         grader_results: dict[str, GraderResult] = {}
+        basis = task.reward_basis or "additive"
         run_cache = self._grader_cache.setdefault(
             context.run_id if context is not None else "", {}
         )
@@ -1307,15 +1331,19 @@ class EvalRunner:
                 )
                 continue
 
-            # 缓存命中 (多采样 deliberate 重试绕过缓存; 缓存按 run 分桶)
-            use_cache = self.enable_grader_cache and config.sample_count <= 1
+            # 缓存命中 (多采样/多评分者 deliberate 重试绕过缓存; 缓存按 run 分桶)
+            use_cache = (
+                self.enable_grader_cache
+                and config.sample_count <= 1
+                and not config.judges
+            )
             if use_cache:
                 cache_key = self._grader_cache_key(config, trial)
                 cached = run_cache.get(cache_key)
                 if cached is not None:
                     hit = cached.model_copy(deep=True)
                     hit.details = {**hit.details, "cached": True}
-                    grader_results[config.name] = hit
+                    grader_results[config.name] = self._annotate_gate(hit, config, basis)
                     continue
 
             try:
@@ -1327,10 +1355,16 @@ class EvalRunner:
                     if context is not None
                     else None
                 )
-                result = await asyncio.wait_for(
-                    grader.grade(trial, spans, task, call_context),
-                    timeout=self.grader_timeout,
-                )
+                if config.judges:
+                    # 多评分者判据: 每个独立 judge 定义对同一 trial 评分 (κ/α 来源)
+                    result = await self._multi_rater(
+                        grader, config, trial, spans, task, call_context
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        grader.grade(trial, spans, task, call_context),
+                        timeout=self.grader_timeout,
+                    )
             except TimeoutError:
                 result = GraderResult(
                     grader_name=config.name,
@@ -1355,8 +1389,12 @@ class EvalRunner:
             # 两条默认规则 (spec: graders) 在这里生效: 分级不是元数据而是判定
             result = enforce_evidence_policy(result, config, grader)
 
-            # LLM Judge 多采样: 计算平均分/不确定性/置信度
-            if config.type == GraderType.MODEL and config.sample_count > 1:
+            # LLM Judge 多采样: 计算平均分/不确定性/置信度 (多评分者判据不混用)
+            if (
+                config.type == GraderType.MODEL
+                and config.sample_count > 1
+                and not config.judges
+            ):
                 result = await self._multi_sample(
                     grader, result, config, trial, spans, task, call_context
                 )
@@ -1364,7 +1402,8 @@ class EvalRunner:
             if use_cache:
                 run_cache[cache_key] = result.model_copy(deep=True)
 
-            grader_results[config.name] = result
+            # 门结果随结论落盘 (生效与否在这里定, 合成时读它)
+            grader_results[config.name] = self._annotate_gate(result, config, basis)
 
         trial.grader_results = [
             grader_results[config.name] for config in task.graders
@@ -1377,6 +1416,107 @@ class EvalRunner:
         trial.invalid_reason = trial_invalid_reason(trial)
 
         return trial
+
+    async def _measure_diagnostic_metrics(
+        self, task: EvalTask, trial: TrialResult
+    ) -> list[DiagnosticMetricResult]:
+        """测量本 task 声明的诊断指标 (spec: llm-metrics 默认仅诊断)。
+
+        刻意不走判分流程: 结果不进 grader_results, 因而不可能进入通过率、
+        pass^k 或任何判分聚合 —— 这是把「诊断量不进分母」变成结构性保证,
+        而不是靠聚合时记得过滤。被本 task 判据显式引用 (type: metric) 的
+        指标视为已升格, 不在这里重复测量。
+        """
+        promoted = task.promoted_metric_names()
+        results: list[DiagnosticMetricResult] = []
+        for name in dict.fromkeys(task.diagnostic_metrics):  # 保序去重
+            if name in promoted:
+                continue
+            metric = self.metrics_registry.get(name)
+            if metric is None:
+                results.append(
+                    DiagnosticMetricResult(
+                        name=name,
+                        error=f"未知指标: {name} (未在 metrics_registry 注册)",
+                    )
+                )
+                continue
+            ctx = build_measurement_context(
+                metric,
+                task_id=task.id,
+                trial=trial,
+                # 诊断运行没有判据配置: RAG 物料 (expected_output/context/
+                # retrieval_context) 不可用, 指标按各自缺参语义显式报缺
+                config={},
+                evidence=trial.evidence,
+            )
+            try:
+                result = await asyncio.wait_for(
+                    metric.measure(ctx), timeout=self.grader_timeout
+                )
+            except TimeoutError:
+                results.append(
+                    DiagnosticMetricResult(
+                        name=name, error=f"诊断指标超时 ({self.grader_timeout}s)"
+                    )
+                )
+                continue
+            except Exception as e:  # noqa: BLE001 — 诊断失败不冒充 0 分也不 crash run
+                results.append(
+                    DiagnosticMetricResult(name=name, error=f"诊断指标计算异常: {e}")
+                )
+                continue
+            if result.details.get("error"):
+                results.append(
+                    DiagnosticMetricResult(
+                        name=name,
+                        reason=result.reason,
+                        threshold=result.threshold,
+                        error=str(result.details["error"]),
+                    )
+                )
+                continue
+            results.append(
+                DiagnosticMetricResult(
+                    name=name,
+                    score=max(0.0, min(1.0, result.score)),
+                    reason=result.reason,
+                    threshold=result.threshold,
+                    details=result.details,
+                )
+            )
+        return results
+
+    def _diagnostic_block(
+        self, trials: list[TrialResult]
+    ) -> list[DiagnosticMetricSummary]:
+        """诊断指标的分值 + 分布摘要 (不进通过率/pass^k/分母/判分聚合)。"""
+        by_name: dict[str, tuple[list[float], int]] = {}
+        for trial in trials:
+            for dr in trial.diagnostic_results:
+                scores, errors = by_name.get(dr.name, ([], 0))
+                if dr.error is None:
+                    scores.append(dr.score)
+                else:
+                    errors += 1
+                by_name[dr.name] = (scores, errors)
+        block: list[DiagnosticMetricSummary] = []
+        for name in sorted(by_name):
+            scores, errors = by_name[name]
+            registered = self.metrics_registry.get(name)
+            block.append(
+                DiagnosticMetricSummary(
+                    name=name,
+                    role=metric_role(registered) if registered else MetricRole.DIAGNOSTIC,
+                    n=len(scores),
+                    avg=(sum(scores) / len(scores)) if scores else None,
+                    min=min(scores) if scores else None,
+                    max=max(scores) if scores else None,
+                    p50=percentile(scores, 50.0) if scores else None,
+                    errors=errors,
+                )
+            )
+        return block
 
     def _resolve_grader(self, config: GraderConfig) -> Grader | None:
         """按配置名解析 grader 实例。
@@ -1540,6 +1680,197 @@ class EvalRunner:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _effective_task(
+        task: EvalTask | None, suite: EvalSuite | None
+    ) -> EvalTask | None:
+        """suite 级 reward_basis 下渗为 task 生效值 (副本, 不改调用方对象)。"""
+        if task is None or task.reward_basis is not None or suite is None:
+            return task
+        return task.model_copy(
+            update={"reward_basis": suite.resolved_reward_basis(task)}
+        )
+
+    def _annotate_gate(
+        self, result: GraderResult, config: GraderConfig, basis: RewardBasis
+    ) -> GraderResult:
+        """门结果 (因子/生效与否/原因) 随结论落盘 (spec: graders 乘性安全门)。
+
+        生效 = 门判为失败且结论有效 (因子在合成时乘进总分); 门通过不乘;
+        证据不足 / 评测侧无有效判定 → 不生效且不冒充 —— 「评测侧没取到证据」
+        不折算成被评方的失败; additive 套件门声明只落盘, 不参与合成。
+        """
+        if config.gate is None:
+            return result
+        factor = config.gate.factor
+        if basis != "multiplicative":
+            return result.model_copy(update={
+                "gate_factor": factor,
+                "gate_applied": False,
+                "gate_reason": (
+                    "门未启用: reward_basis=additive (声明随结论落盘, 不参与合成)"
+                ),
+            })
+        verdict = grader_verdict(result)
+        if verdict is TrialVerdict.PENDING:
+            return result.model_copy(update={
+                "gate_factor": factor,
+                "gate_applied": False,
+                "gate_reason": "门未生效: 等待人工评分回传",
+            })
+        if verdict is TrialVerdict.INVALID:
+            reason_code = (
+                result.invalid_reason.value if result.invalid_reason else "unknown"
+            )
+            return result.model_copy(update={
+                "gate_factor": factor,
+                "gate_applied": False,
+                "gate_reason": (
+                    f"门未生效: 评测侧未产出有效判定 ({reason_code}) — "
+                    "证据不足不冒充生效, 也不折算为被评方失败"
+                ),
+            })
+        if result.passed:
+            return result.model_copy(update={
+                "gate_factor": factor,
+                "gate_applied": False,
+                "gate_reason": "门通过: 因子未乘入",
+            })
+        return result.model_copy(update={
+            "gate_factor": factor,
+            "gate_applied": True,
+            "gate_reason": f"门失败: 乘入因子 {factor}",
+        })
+
+    def _multiplicative_synthesis(
+        self, task: EvalTask, grader_results: list[GraderResult]
+    ) -> float:
+        """multiplicative 合成: 基础分 (非门判据, 按既有策略语义) × ∏(生效门因子)。
+
+        门未生效 (证据不足/评测侧无有效判定) 的因子不乘 —— 总分不因评测侧
+        缺料而塌缩; 门失败的因子按声明塌缩总分 (硬门 factor=0 → 总分 0)。
+        """
+        pairs = list(zip(grader_results, task.graders, strict=False))
+        base_pairs = [(r, gc) for r, gc in pairs if gc.gate is None]
+        strategy = task.score_strategy
+
+        if strategy == ScoreStrategy.ALL_PASS:
+            # 全部非门判据通过 = 基础分 1.0; 任一失败塌为 0 (门由乘子另行表达)
+            base = (
+                (1.0 if all(r.passed for r, _ in base_pairs) else 0.0)
+                if base_pairs
+                else 1.0
+            )
+        elif strategy == ScoreStrategy.WEIGHTED:
+            base = self._weighted_base(base_pairs)
+        else:  # HYBRID: required 非门判据一票否决 (基础分塌为 0), 其余按加权均值
+            required_ok = all(r.passed for r, gc in base_pairs if gc.required)
+            non_required = [(r, gc) for r, gc in base_pairs if not gc.required]
+            base = self._weighted_base(non_required) if required_ok else 0.0
+
+        factor = 1.0
+        for r, gc in pairs:
+            if gc.gate is not None and r.gate_applied:
+                factor *= gc.gate.factor
+        return base * factor
+
+    @staticmethod
+    def _weighted_base(pairs: list[tuple[GraderResult, GraderConfig]]) -> float:
+        """加权均值基础分 (权重全 0 退化为简单均值; 空对 → 1.0 与既有约定一致)。"""
+        if not pairs:
+            return 1.0
+        total_weight = sum(gc.weight for _, gc in pairs)
+        if total_weight == 0:
+            return sum(r.score for r, _ in pairs) / len(pairs)
+        return sum(r.score * gc.weight for r, gc in pairs) / total_weight
+
+    async def _multi_rater(
+        self,
+        grader: Grader,
+        config: GraderConfig,
+        trial: TrialResult,
+        spans: list[dict[str, Any]],
+        task: EvalTask,
+        context: EvalContext | None,
+    ) -> GraderResult:
+        """多评分者判据: 每个独立 judge 定义对同一 trial 独立评分。
+
+        首个定义是基准结论 (success/pass 语义与单评分者完全同构); 全部评分者
+        的分数与判定按 trial 对齐进 ``rater_scores`` / ``rater_ratings`` ——
+        κ/α 的来源。某评分者本 trial 无有效判定记 None (缺失), 不冒充一致。
+        """
+        results: list[GraderResult] = []
+        for judge in config.judges:
+            judge_config = config
+            if judge.config:
+                judge_config = config.model_copy(
+                    update={"config": {**config.config, **judge.config}}
+                )
+            call_context = (
+                replace(context, grader_config=judge_config)
+                if context is not None
+                else None
+            )
+            try:
+                result = await asyncio.wait_for(
+                    grader.grade(trial, spans, task, call_context),
+                    timeout=self.grader_timeout,
+                )
+            except Exception as e:  # noqa: BLE001 — 单个评分者故障 = 该格缺失
+                result = GraderResult(
+                    grader_name=config.name,
+                    grader_type=config.type,
+                    score=0.0,
+                    passed=False,
+                    explanation=f"评分者 '{judge.name}' 评分失败: {e}",
+                    verdict=TrialVerdict.INVALID,
+                    invalid_reason=InvalidReason.GRADER_ERROR,
+                )
+            results.append(enforce_evidence_policy(result, judge_config, grader))
+
+        primary = results[0]
+        rater_scores: dict[str, float | None] = {}
+        rater_ratings: dict[str, str | None] = {}
+        for judge, r in zip(config.judges, results, strict=True):
+            valid = grader_verdict(r) is TrialVerdict.VALID
+            rater_scores[judge.name] = r.score if valid else None
+            rater_ratings[judge.name] = (
+                ("pass" if r.passed else "fail") if valid else None
+            )
+        return primary.model_copy(update={
+            "rater_scores": rater_scores,
+            "rater_ratings": rater_ratings,
+            "details": {
+                **primary.details,
+                "rater_scores": rater_scores,
+                "rater_ratings": rater_ratings,
+                "rater_count": len(config.judges),
+            },
+        })
+
+    def _agreement_block(
+        self, run: RunResult, suite: EvalSuite
+    ) -> dict[str, AgreementReport]:
+        """跨评分者一致性 (κ/α): 评分按 trial 对齐后计算 (spec: statistics)。"""
+        aligned: dict[str, dict[tuple[str, int], dict[str, str | None]]] = {}
+        for task_id, trials in run.trials.items():
+            for trial in trials:
+                for gr in trial.grader_results:
+                    if not gr.rater_ratings:
+                        continue
+                    units = aligned.setdefault(gr.grader_name, {})
+                    unit = units.setdefault((task_id, trial.trial_index), {})
+                    unit.update(gr.rater_ratings)
+        block: dict[str, AgreementReport] = {}
+        for grader_name, units in sorted(aligned.items()):
+            raters: set[str] = set()
+            for ratings in units.values():
+                raters.update(ratings)
+            block[grader_name] = agreement_report(
+                raters=sorted(raters), units=list(units.values())
+            )
+        return block
+
     def _compute_trial_success(
         self,
         task: EvalTask,
@@ -1548,6 +1879,11 @@ class EvalRunner:
         """根据评分策略判断 trial 是否成功"""
         strategy = task.score_strategy
         threshold = task.score_threshold
+
+        # multiplicative: 基础分按既有策略语义合成, 门失败经乘子塌缩总分,
+        # 成功 = 塌缩后的总分过阈 (additive 路径与 0.2.0 逐位一致)
+        if (task.reward_basis or "additive") == "multiplicative":
+            return self._multiplicative_synthesis(task, grader_results) >= threshold
 
         if strategy == "all_pass":
             return all(r.passed for r in grader_results) if grader_results else True
@@ -1612,6 +1948,10 @@ class EvalRunner:
         if task is None:
             return trial.avg_score()
 
+        # multiplicative: 与成功判定同源的合成 (基础分 × 生效门因子)
+        if (task.reward_basis or "additive") == "multiplicative":
+            return self._multiplicative_synthesis(task, trial.grader_results)
+
         results = trial.grader_results
         if task.score_strategy == ScoreStrategy.HYBRID:
             pairs = [
@@ -1668,7 +2008,7 @@ class EvalRunner:
 
         for task_id, trials in run.trials.items():
             all_trials.extend(trials)
-            task = tasks_by_id.get(task_id)
+            task = self._effective_task(tasks_by_id.get(task_id), suite)
 
             buckets = split_trials_by_verdict(trials)
             valid_indices = [i for i, _ in buckets[TrialVerdict.VALID]]
@@ -1734,6 +2074,7 @@ class EvalRunner:
                 resources=summarize_resources(trials),
                 evidence_levels=evidence_mix,
                 subject_only_trials=subject_only,
+                diagnostic_metrics=self._diagnostic_block(trials),
             ))
 
             pooled_valid += len(valid_indices)
@@ -1780,6 +2121,8 @@ class EvalRunner:
             resources=summarize_resources(all_trials),
             evidence_levels=pooled_evidence,
             subject_only_trials=pooled_subject_only,
+            diagnostic_metrics=self._diagnostic_block(all_trials),
+            agreement=self._agreement_block(run, suite),
             saturation=self._detect_saturation(
                 task_summaries, min_valid_trials=self.min_valid_trials_for_saturation
             ),

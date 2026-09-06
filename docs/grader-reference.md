@@ -291,7 +291,13 @@ task 声明了 `optimal_steps` 时额外输出 `step_efficiency`（最优步数 
     thresholds: { "0.8": 1.0 }   # 可选，逐指标阈值覆盖
 ```
 
-从 EvalRunner 注入的指标注册表分发（`answer_relevancy` / `faithfulness` / `context_recall` / `context_precision` 等）。未注册的指标名 → `invalid` / `unknown_grader`；指标因缺输入材料无法计算（如 faithfulness 无 `context`）→ `invalid` / `no_criteria_configured`；两者都**不得**折成 agent 的 0 分。
+从 EvalRunner 注入的指标注册表分发（`answer_relevancy` / `faithfulness` / `context_recall` / `context_precision` 等）。未注册的指标名 → `invalid` / `unknown_grader`（错误文案列出已注册指标名）；指标因缺输入材料无法计算（如 faithfulness 无 `context`）→ `invalid` / `no_criteria_configured`；两者都**不得**折成 agent 的 0 分。
+
+0.3.0 起：
+
+- 指标经宽签名测量（`measure(ctx: MeasurementContext)`），判据引用指标即**升格**为判分量 —— 结论的 `details` 携带该指标的角色（`metric_role`）与取信声明（`metric_evidence_declaration`）
+- 轨迹类指标默认注册为 `diagnostic`（仅诊断块，不进任何分母）；判据里显式引用即升格进判分流程，并从诊断块移入判分块
+- 未升格的指标经 task 级 `diagnostic_metrics` 声明仅诊断运行（语法见 yaml-format）
 
 ## 评分聚合策略（task 级）
 
@@ -311,3 +317,19 @@ curl http://localhost:8000/api/eval/graders     # 或独立部署 /v1/graders
 ```
 
 返回全部可用评分器（name / type / description）。
+
+## 门判据与乘性合成（0.3.0）
+
+判据可声明为门（`gate: { factor }`）并把 task / suite 的 `reward_basis` 设为 `multiplicative`（语法与校验规则见 yaml-format）。门结论随 run 落盘、报告与 API 可见，三个专用字段：
+
+| 字段 | 含义 |
+|------|------|
+| `gate_factor` | 声明的因子（0-1）；`None` = 非门判据（历史 run 亦为 None） |
+| `gate_applied` | 因子是否已乘入总分（仅 multiplicative 且门判为失败时 true） |
+| `gate_reason` | 生效/未生效原因：门失败乘入 / 门通过未乘 / 证据不足未生效 / additive 未启用 |
+
+门的判定走判据自己的取信声明（`evidence` / `allow_subject` / `judgment_moment`）—— 不新造第二套证据机制；subject 级自报证据不得触发门（门判据声明 `allow_subject` 直接被装配期拒绝）。报告的「门 (gate) 结果」一节汇总每个门的因子与生效次数。
+
+## 多评分者判据（0.3.0）
+
+判据配置 ≥2 个 `judges` 定义后，每个定义对同一批 trial 独立评分；结论的 `rater_scores` / `rater_ratings` 按 trial 对齐，run 汇总的 `agreement` 块报告 Cohen's κ（两评分者无缺失）或 Krippendorff's α（≥2 评分者或含缺失），并附一致/分歧计数。评分者不足或对齐样本过少 → 值为 `None` + 原因（insufficient_data 语义），不伪造数值。

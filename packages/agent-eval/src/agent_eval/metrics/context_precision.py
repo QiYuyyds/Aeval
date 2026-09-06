@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_eval.core.types import MeasurementContext
 from agent_eval.metrics.base import BaseLLMMetric, MetricError, MetricResult
 
 
@@ -27,15 +28,8 @@ class ContextPrecisionMetric(BaseLLMMetric):
   "reason": "一句话理由"
 }"""
 
-    async def measure(
-        self,
-        input: str,
-        actual_output: str,
-        expected_output: str | None = None,
-        context: list[str] | None = None,
-        retrieval_context: list[str] | None = None,
-    ) -> MetricResult:
-        docs = [d for d in (retrieval_context or []) if str(d).strip()]
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        docs = [d for d in (ctx.retrieval_context or []) if str(d).strip()]
         if not docs:
             return MetricResult(
                 name=self.name,
@@ -46,7 +40,7 @@ class ContextPrecisionMetric(BaseLLMMetric):
             )
 
         doc_lines = "\n".join(f"[{i}] {doc}" for i, doc in enumerate(docs))
-        user_prompt = f"用户问题: {input}\n\n检索文档:\n{doc_lines}"
+        user_prompt = f"用户问题: {ctx.prompt}\n\n检索文档:\n{doc_lines}"
         data = await self._llm_judge(self._SYSTEM_PROMPT, user_prompt)
 
         if "score" not in data:

@@ -362,3 +362,83 @@ uvicorn.run(create_standalone_app(runner=my_runner), host="127.0.0.1", port=8000
 ```
 
 API 兼容承诺：同一大版本内 URL 与响应结构向后兼容；破坏性变更升 `/v2` 并保留并行期。
+
+## 11. 指标作者迁移指南（0.2.x → 0.3.0，破坏性）
+
+0.3.0 把指标测量入口从五个字符串换成一个测量上下文对象。**没有兼容层、没有继承桥、没有 legacy 旗标** —— 旧签名在装配期即报错。
+
+### 11.1 旧五参 → MeasurementContext 字段对照表
+
+| 旧签名参数 | 新字段 | 说明 |
+|------------|--------|------|
+| `input` | `ctx.prompt` | 用户输入 / 问题 |
+| `actual_output` | `ctx.actual_output` | Agent 最终输出（transcript 末条正文） |
+| `expected_output` | `ctx.expected_output` | 期望输出（判据 config 注入） |
+| `context` | `ctx.context` | RAG 上下文文档（判据 config 注入） |
+| `retrieval_context` | `ctx.retrieval_context` | 检索到的原始文档（判据 config 注入） |
+| —（新） | `ctx.task_id` | 任务标识 |
+| —（新） | `ctx.observations` | 按声明过滤后的观测序列（`Observation`，带 `observed_by` 与采集时刻） |
+| —（新） | `ctx.declaration` | 本指标生效的取信声明 |
+
+迁移就是把 `measure(input, actual_output, ...)` 改成 `measure(ctx)` 并按上表取字段：
+
+```python
+# 0.2.x（已移除）
+class MyMetric(Metric):
+    async def measure(self, input, actual_output, expected_output=None,
+                      context=None, retrieval_context=None) -> MetricResult:
+        ...
+
+# 0.3.0
+from agent_eval.core.types import MeasurementContext
+
+class MyMetric(Metric):
+    name = "my_metric"
+    threshold = 0.5
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        user_prompt = f"问题: {ctx.prompt}\n回答: {ctx.actual_output}"
+        ...
+```
+
+不依赖证据对象的独立调用方（prompt A/B、批量评测、pytest 插件）用便捷构造：
+
+```python
+ctx = MeasurementContext.of(input="q", actual_output="a",
+                            context=["doc"], retrieval_context=["doc"])
+result = await metric.measure(ctx)
+```
+
+### 11.2 取信声明：读证据前先声明
+
+想读轨迹（消息序列 / 步骤 / 状态读数）的指标，用类属性声明自己消费的**通道**；未声明 = 只看最终输出（与 0.2.0 行为逐字段等价，`ctx.observations` 为空）：
+
+```python
+class TrajectoryJudge(BaseLLMMetric):
+    name = "trajectory_judge"
+    evidence_levels = ("transcript", "steps")   # 可选: transcript / steps / harness_state / subject_state
+
+    async def measure(self, ctx: MeasurementContext) -> MetricResult:
+        prompt = judge_user_prompt(base_prompt, ctx, redactor=self.redactor)
+        ...
+```
+
+- `ctx.observations` 只含声明通道内的读数；缺失读数（`observed_by` / `observed_at` 齐全）保留 —— 没取到 ≠ 被排除
+- 空声明 / 未知通道 / 重复通道在装配期报错，错误信息列出可选值
+- judge 轨迹注入：`judge_user_prompt(base, ctx, redactor=...)` 在声明含 `transcript` / `steps` 时把逐条编号的轨迹（经脱敏钩子）追加进提示词；未声明时提示词逐字节不变
+
+### 11.3 角色：默认判分，轨迹指标默认诊断
+
+`role` 声明指标在目录中的角色。不写 = `judging`（既有指标行为不变）；轨迹类指标应注册为 `diagnostic` —— 分值只出现在报告诊断块，不进通过率分子分母、不参与判分：
+
+```python
+class StepWasteMetric(Metric):
+    name = "step_waste"
+    role = MetricRole.DIAGNOSTIC        # 默认仅诊断
+    evidence_levels = ("steps",)
+```
+
+启用诊断运行：task 级 `diagnostic_metrics: [step_waste]`。升格为判分量：在判据里显式引用（`type: metric` 的判据即升格），升格后它走判分流程、受取信声明与门机制约束，并从诊断块移入判分块。
+
+### 11.4 LLM 函数与脱敏钩子的注入
+
+注入约定不变：runner 把 `llm_fn` 注入未自行配置的指标。0.3.0 起同时注入 `redactor`（脱敏钩子）—— 轨迹进 judge 提示词前应经 `self.redactor` 处理（`HashingEvidenceRedactor` 幂等，重复应用无副作用）。
