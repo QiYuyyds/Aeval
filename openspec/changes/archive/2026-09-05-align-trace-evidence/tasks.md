@@ -82,4 +82,9 @@
 - [x] 10.3 **成本对明细桶重复计费** —— `PriceTable.cost_usd` 把 cache_read 与 reasoning 当作与 input/output 并列的第四路相加。真实数据核实：`total = prompt + completion` 在 199/199 条 LLM span 上恒成立，且 `cache_read ≤ prompt`、`reasoning ≤ completion`，即二者是子集。高缓存命中场景下成本被放大 5.4 倍（四价齐全）至 9.3 倍（仅给输入/输出价，走回落档）。而 `gen_ai.usage.cache_read.input_tokens` 本就在默认映射里，任何开启 prompt 缓存的标准埋点都会立刻中招
 - [x] 10.4 修复为子集口径（先从父桶扣出再各自计价），新增 `detail_semantics="disjoint"` 作为 Anthropic 风格 provider 的显式逃生口，明细大于父桶时报 `detail_tokens_exceed_parent` 不可计算而不夹取；三个用例分别锁定子集、disjoint、矛盾口径
 - [x] 10.5 宿主侧映射按实测词汇修正 —— token/模型只有 OpenInference 名有值（`llm.token_count.*`，199/199），`agenthub.input_tokens` 一类实测 0/1000 仅作兜底；候选首位改为有数据者，版本升至 `agenthub-2`
-- [ ] 10.6 宿主 venv 仍是 PyPI 的 `aeval-framework 0.1.0`（`agent_eval.trace.mapping` 不存在）。升级后需在同一 suite 上复跑一次探针与 `run_first_suite.py`，把本文 8.1 的数字换成「一次完整评测」而非「历史 trace 取样」
+- [x] 10.6 宿主 venv 仍是 PyPI 的 `aeval-framework 0.1.0`（`agent_eval.trace.mapping` 不存在）。升级后需在同一 suite 上复跑一次探针与 `run_first_suite.py`，把本文 8.1 的数字换成「一次完整评测」而非「历史 trace 取样」
+  - 2026-09-05 完成：宿主 venv 换成本地实现（`--no-deps` 安装，依赖版本逐一比对未变动），`tests/test_eval_integration_*` 共 55 项不再需要 `PYTHONPATH` 即通过
+  - 完整评测 `run_de01a6ca31ba`（`achat-first-suite v1.1.0`）：**9 trial 全部 valid、invalid=0**，9 个互不相同的 trace_id，每个 trial 都有真实的 turns / in / out / cache_read / reasoning；`cost_usd` 正确报 `price_table_not_configured` 而非 0
+  - 对照基线：历史 29 次 trial 只有 5 次走到评分，且那 5 次的 `n_turns` / `n_total_tokens` 全为 0.0
+  - 过程中另查出三个宿主侧缺陷，同属「误以为与 agent 同进程」及其变体，已在宿主提交 `90f3a78` 修复：`completion_channel="auto"` 以模块可否 import 冒充进程同域；`_phoenix_trace_id` 重犯了本变更 10.1 的 dataframe 形状假设（`"attributes" in df.columns` 恒假）；进程内 trace 桥在 HTTP 路径下白等 `trace_wait_timeout`
+  - 遗留（不属于本变更）：宿主 `run_first_suite.py` 末尾的失败清单仍按 `t.success` 判定，与 `invalid` 语义不一致，会把评测侧故障显示成 "failed tasks"
