@@ -21,3 +21,6 @@ out/
 .env.*
 .DS_Store
 Thumbs.db
+
+# Editor-local state (Qoder)
+.qoder/
