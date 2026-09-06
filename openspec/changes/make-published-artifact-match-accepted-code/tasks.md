@@ -29,8 +29,8 @@
   - 共发现一处：preset 4.3，已改回未勾并写明缺口（无持久命令输出、当前无法复现）与补救路径（Phoenix 在线时补跑）。③ 侧零虚标。
 - [x] 2.4 确认 `10.4`（dashboard build）标注是否成立：若 ③ 确实未触及 `apps/dashboard`，记 N/A 并说明；否则补跑
   - 成立：`git log 4fc28cf^..HEAD -- apps/dashboard` 为空，③ 的 6 个提交无一触及 dashboard；维持"未跑"的 N/A 标注（不是"跑绿"）。
-- [ ] 2.5 未办的 `4.4`（宿主活跑，会产生真实 agent 调用）：需用户授权后执行，判据是 9 trial 仍全部 `valid` 且结论带最弱证据级别标注
-  - **2026-09-06 用户指示宿主仓库不用管，本条显式搁置**；缺口已记录在 preset 归档的 4.4 条目下，下次宿主动 eval 链路时补跑即可。
+- [x] 2.5 未办的 `4.4`（宿主活跑，会产生真实 agent 调用）：需用户授权后执行，判据是 9 trial 仍全部 `valid` 且结论带最弱证据级别标注
+  - 用户授权后执行（2026-09-06）。**前置修复**：宿主库被重置过，`.env` 的 `EVAL_AGENT_ID` 指向已删除的 agent，首跑 9 trial 全部在创建会话时 400（`run_6d5b2e262a65`，invalid，零 agent 成本）；改指 `.agenthub-data` SQLite 库里的评测 agent `ag_yTc8OAQE5Uzi`（coder，带 deploy_workspace——上次验收用的就是它）后重跑。**`run_fd7ef8c369b6`：9 trial 全 valid、pass@1=100%，file-creation 弱证据=harness、其余 runner，汇总 evidence_levels {runner:6, harness:3}、subject_only=0**，run 记录自带 mapping=agenthub-3 / spec=openinference-0.1.30。这次活跑同时构成归档 preset 4.3 缺的真实 trace 回归证据（见该条补记）。
 
 ## 3. 归档两个 change
 
@@ -56,6 +56,7 @@
   - README.md 与 README.zh-CN.md 都已并列两条路径，均无版本号钉死。
 - [x] 4.4 确认宿主 `.venv` 在正式包发布后可从 `aeval-framework==0.2.0` 安装（当前依赖 editable）
   - 已确认：宿主 venv 里 `aeval-framework 0.1.0` 是 editable 安装（Editable project location: `D:\java\project\Aeval-publish\packages\agent-eval`）；宿主 `requirements.txt` 注释早已写明 PyPI 发行路径 `pip install "aeval-framework[api,cli]"`，发布后切到 `==0.2.0` 无障碍。
+  - **发布后实装完成（2026-09-06）**：uninstall editable → `pip install -i https://pypi.org/simple "aeval-framework[api,cli]==0.2.0"`（本机 pip 默认清华镜像，尚未同步 0.2.0，必须显式官方索引）→ `pip show` 确认 0.2.0 且 Location 为 site-packages、无 editable 标记 → 宿主 eval 测试 **59 passed**。发布版在真实下游消费者上成立。
 
 ## 5. 从制品验证（必须先于 tag）
 
@@ -83,6 +84,7 @@
 
 - [x] 7.1 宿主 finalize span 发往 Phoenix 的三个假零（`getattr(result, 'turns'|'total_tokens'|'duration_ms', 0)`，`RunResult` 无这些字段）→ 属宿主仓库变更，动手前先量 `run_span_collector` 的属性形状
   - 登记：宿主仓库独立变更；动手前置条件（先量 `run_span_collector` 属性形状）随项携带。
+  - **改判（2026-09-06，修正此前排序）**：② 落地后 Aeval 只经映射表读 `llm.token_count.*` 一类规范名，finalize 上这三个假零不在任何映射里（`run_fd7ef8c369b6` 的未识别属性清单实测含 `agenthub.total_tokens/duration_ms/total_turns`）——它们不污染评测数字，只误导 Phoenix UI 里看"运行收尾"的人和宿主自己的展示层。从"该排 ④ 前面"降为"宿主顺手小修"。
 - [x] 7.2 `agenthub.agent_name` 补齐后把 `agent.name` 接入映射（已决定不把 agent_id 当名字）
   - 登记：宿主仓库变更；前置是宿主侧先补齐 `agenthub.agent_name` 字段，然后作为 `TRACE_MAPPING_ENTRIES` 追加条目 + `TRACE_MAPPING_VERSION` 递增（现 `agenthub-3`）。
 - [x] 7.3 下一个真正的能力变更是 ④ agent 指标目录（宽签名 `measure()`、judge 看轨迹、跨评分者一致性 κ/α、`reward_basis` 式乘性安全门、轨迹默认仅诊断）→ 需另立 change 与提案

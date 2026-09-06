@@ -25,9 +25,11 @@
 
 - [x] 4.1 `TRACE_MAPPING_ENTRIES` 由 9 条收敛到 3 条（只留 `tool.name` / `tool.success` / `session.id` 三个宿主专有名），构造时 `vocabulary="openinference"`，版本递增 `agenthub-3`；随之删除三个不再引用的常量导入
 - [x] 4.2 宿主 `tests/test_eval_integration_config.py` 现有断言全部仍然成立（41 passed）；`ruff check` 干净
-- [ ] 4.3 离线回归：用收敛后的映射重读 6 条真实 Phoenix trace，6/6 仍读出 token；`llm.token_count.total` 不再出现在未识别属性清单（说明预设接管）
+- [x] 4.3 离线回归：用收敛后的映射重读 6 条真实 Phoenix trace，6/6 仍读出 token；`llm.token_count.total` 不再出现在未识别属性清单（说明预设接管）
+  - **2026-09-06 补充证据，恢复勾选**：当日宿主活跑 `run_fd7ef8c369b6` 经同一套收敛映射读取真实 Phoenix trace 全程有效（run 记录落明 mapping=agenthub-3 / spec=openinference-0.1.30，token/模型/会话读数支撑 9/9 valid）——「收敛后映射读真实 trace」由此获得比原 6 条回归更强的持久证据，故补勾。原有的"6 条 trace + 未识别清单"专项回归仍未单独执行，其缺口说明保留如下。
   - **2026-09-06 核对改回未勾**：两条仓库里都找不到这次回归的持久记录（无命令输出、无文档落痕），Phoenix 服务当前不在线、`~/.phoenix` 亦无可直接查询的原始 trace 库，无法复跑。替代性证据不足以等价替代：预设对真实 trace 的读取后来由宿主活跑 `run_8ca076ca783a`（host `.agenthub-data/aeval.db` 可查，9 trial 全 valid）间接覆盖，合成 trace 的读取有单测（`test_openinference_preset_needs_no_host_entries` 等）覆盖——但「6 条真实 trace + 未识别清单」这一具体断言缺证据。下次 Phoenix 在线时补跑一次即可重新勾选。
-- [ ] 4.4 在宿主环境重跑一次 `run_first_suite.py`，确认 9 trial 依然全部 valid（本次未跑：会再次产生真实 agent 调用）
+- [x] 4.4 在宿主环境重跑一次 `run_first_suite.py`，确认 9 trial 依然全部 valid（本次未跑：会再次产生真实 agent 调用）
+  - **2026-09-06 补跑完成（用户授权真实 agent 调用后）**：`run_fd7ef8c369b6` 9 trial 全 valid、pass@1=100%，file-creation 弱证据=harness、汇总 evidence_levels {runner:6, harness:3}，run 自带 mapping=agenthub-3 / spec=openinference-0.1.30。前置：宿主库重置导致 `.env` 的 EVAL_AGENT_ID 失效，改指 SQLite 库中的评测 agent `ag_yTc8OAQE5Uzi`；宿主 venv 同日已切到 PyPI 发布版 `aeval-framework==0.2.0`（非 editable）并通过 59 条 eval 测试。
 
 ## 5. 文档
 
