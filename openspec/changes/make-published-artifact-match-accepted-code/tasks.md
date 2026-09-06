@@ -33,12 +33,18 @@
 
 ## 3. 归档两个 change
 
-- [ ] 3.1 顺序 **preset → ③**（③ 落在新能力 `extension-contracts`，与 preset 的 `trace-provider` 无冲突；反序会让 `trace-provider` 的 Purpose 与需求归属来回改写）
-- [ ] 3.2 归档前确认 `openspec/specs/` 已入库（第 1.2 步），并核对合并结果无同名 Requirement 冲突、主 spec 的 `## Purpose` 无 TBD
-- [ ] 3.3 `openspec archive add-openinference-mapping-preset --yes`
-- [ ] 3.4 `openspec archive separate-collection-from-grading --yes`
-- [ ] 3.5 归档后主 spec 应为 **11 个能力**（新增 `extension-contracts`）；`openspec validate --all --strict` 通过；`openspec list --json` 只剩本变更
-- [ ] 3.6 提交归档结果（一笔，`chore(openspec): archive ...`）
+- [x] 3.1 顺序 **preset → ③**（③ 落在新能力 `extension-contracts`，与 preset 的 `trace-provider` 无冲突；反序会让 `trace-provider` 的 Purpose 与需求归属来回改写）
+  - 按此顺序执行。
+- [x] 3.2 归档前确认 `openspec/specs/` 已入库（第 1.2 步），并核对合并结果无同名 Requirement 冲突、主 spec 的 `## Purpose` 无 TBD
+  - `openspec/specs/` 已在 `efab9f1` 入库；preset delta = 1 MODIFIED + 3 ADDED，③ delta 全 ADDED 且与现有 specs 的 Requirement 名 comm 交集为空；`grep TBD openspec/specs/` 为空。
+- [x] 3.3 `openspec archive add-openinference-mapping-preset --yes`
+  - 归档为 `2026-09-06-add-openinference-mapping-preset`；trace-provider +3 ADDED ~1 MODIFIED。归档器提示 2 条未勾任务（4.3 本次改回未勾、4.4 待授权）——如实带入档案。
+- [x] 3.4 `openspec archive separate-collection-from-grading --yes`
+  - 归档为 `2026-09-06-separate-collection-from-grading`；extension-contracts 新建，graders/orchestration/storage/suite-format 各 +ADDED，合计 +15。
+- [x] 3.5 归档后主 spec 应为 **11 个能力**（新增 `extension-contracts`）；`openspec validate --all --strict` 通过；`openspec list --json` 只剩本变更
+  - 11 个能力目录实测相符；validate --all --strict 12 passed / 0 failed；changes 仅剩本变更。
+- [x] 3.6 提交归档结果（一笔，`chore(openspec): archive ...`）
+  - 提交 `a4e9e75`，21 files，含两份带逐条核对结论的 tasks.md 一并入档。
 
 ## 4. 版本与迁移说明
 
