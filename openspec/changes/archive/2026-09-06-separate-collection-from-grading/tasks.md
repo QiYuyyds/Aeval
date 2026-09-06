@@ -77,3 +77,60 @@
 - [x] 10.5 离线 `eval-suite run examples/minimal/suite.yaml` 正常产出，且结论带最弱证据级别标注
 - [x] 10.6 `openspec validate separate-collection-from-grading --strict` 通过
 - [x] 10.7 体积实测：开启正文采集后单 trial 归档字节数（已知均值 2,352 字符、最大 73,899），据此回答 design 的留存策略待答项
+
+---
+
+## 逐条核对结论（2026-09-06，由 make-published-artifact-match-accepted-code 任务 2.2 执行）
+
+49 条勾选逐条复核（10.4 见下），**无一条虚标**，均有可指认的用例/提交/库记录：
+
+- 1.1 ✓ `ObservedBy` 三级枚举（types.py:111）+ `Observation.observed_by`；测试 `test_same_reading_is_distinguishable_across_levels`、`test_levels_are_ordered_by_strength`。
+- 1.2 ✓ `TrialEvidence`（types.py:639）双环境通道分离；`test_two_state_channels_coexist_and_contradict`；gaps 复用 `EvidenceGap`。
+- 1.3 ✓ `TrialSession`（contract.py:116，emit/harness_probe/deadline/cancelled 全备）；`test_simple_path_needs_no_session` 证只用返回值仍可接入。
+- 1.4 ✓ `TrialResult` 新字段全部带默认值；`test_trial_result_defaults_keep_old_payloads_loadable`。
+- 1.5 ✓ `test_subject_level_survives_serialisation`（序列化可区分）、`test_absent_reading_differs_from_empty_reading`（缺失≠空）。
+- 2.1 ✓ `contract.py` 的 `run(view, session) -> TrialEvidence`（本变更任务 1.6 已验证两个 HEAD 配对）；`grep tuple\[str contract.py` = 0，无兼容层残留。
+- 2.2 ✓ `test_task_view_carries_no_graders_or_answer_keys`、`test_agent_runner_receives_only_the_view`。
+- 2.3 ✓ `GraderConfig.evidence_levels`（types.py）+ `test_grader_config_defaults_to_trusted_levels` / `can_narrow_to_harness_only` / `rejects_empty_declaration`。
+- 2.4 ✓ `src/agent_eval/examples/mock_runner.py` 实存；三条路径各有用例（`test_simple_path_needs_no_session` / `test_session_path_pushes_and_probes_mid_run` / `test_emit_only_path_lands_in_the_same_channels`）。
+- 2.5 过渡步骤（当时允许红），终态由第 10 节全绿覆盖。
+- 3.1 ✓ `test_lifecycle_order_is_setup_run_probe_teardown_grade`、`test_end_state_reading_exists_without_probe_implementation`。
+- 3.2 ✓ 默认环境探针返回带原因缺失：`test_broken_probe_never_becomes_a_pass`、`test_end_state_reading_exists_without_probe_implementation`。
+- 3.3 ✓ (时刻,读数) 序列与三种取值器：`test_end_state_merges_every_probe_channel` / `test_end_state_keeps_the_last_reading_of_each_channel` / `test_created_then_deleted_only_passes_any_time` / `test_not_at_end_reads_the_same_end_state_inverted`。
+- 3.4 ✓ `test_leak_check_reads_harness_readings_not_self_report`。
+- 3.5 ✓ `test_created_then_deleted_fails_at_end_and_passes_any_time`、`test_any_time_without_mid_run_probe_is_insufficient`、`test_not_at_end_asserts_absence_at_end`。
+- 4.1 ✓ 九个内置 grader 全部声明 evidence_levels（artifact_check/code_based/human/metric/model_based/state_check/step_level/tool_calls/transcript）；state_check 优先序 `(HARNESS, RUNNER, SUBJECT)`（state_check.py:62）。
+- 4.2 ✓ `test_subject_only_pass_without_escape_switch_is_invalid`、`test_grader_reading_undeclared_level_is_rejected_with_distinct_reason`（原因文案可区分）。
+- 4.3 ✓ `allow_subject`（types.py:303、_evidence.py:40-44）+ `test_allow_subject_is_recorded_on_the_run`。
+- 4.4 ✓ `test_conclusions_disclose_their_weakest_level`；汇总 `RunSummary.evidence_levels` / `subject_only_trials`（cli.py `_evidence_line` 展示；离线实跑输出 `Evidence: runner=6`）。
+- 4.5 ✓ `judgment_moment` 进配置（types.py:308，默认 at_end）与结果（types.py:943）；yaml-format.md 校验表 :83。
+- 4.6 ✓ 参数化 `test_same_evidence_three_declarations`。
+- 5.1 ✓ `@pytest.mark.parametrize("backend", ["memory", "sqlite"])` + `test_evidence_archived_per_trial_and_retrievable`；活跑 9 trial 落 9 条 `trial_evidence` 行（host 库实测）。
+- 5.2 ✓ `test_each_verdict_records_its_caliber`、`test_regrade_appends_and_moves_the_current_pointer`；`fix(storage)` 提交 `9005c0f` 让 `current` 指针从列读回。
+- 5.3 ✓ `test_regrade_refuses_when_evidence_is_incomplete`、`test_regrade_requires_the_grader_definitions`；入口 `EvalRunner.regrade_run` + `regrade_state()`（runner.py:201）。
+- 5.4 ✓ `test_regrade_never_touches_the_evaluated_system`（mock 断言调用为 0）。
+- 5.5 ✓ `test_summary_counts_only_the_current_verdict`。
+- 5.6 ✓ `/v1/meta` 能力清单声明 `regrade_over_http: False` / `regrade_over_cli: False` + `not_exposed.regrade` 说明（api/app.py:134-141）。
+- 6.1 ✓ 两开关统一为 `CapturePolicy`：`test_capture_policy_defaults_closed` / `test_legacy_bool_means_tool_arguments_only` / `test_capture_policy_inherits_field_by_field`；脱敏标识落盘 `redactor_identifier/version`（types.py:567-568）；core/redaction.py 实存。
+- 6.2 ✓ `test_uncaptured_content_yields_evidence_unavailable_not_failure`。
+- 6.3 ✓ `test_the_two_switches_stay_independent_and_visible`。
+- 6.4 ✓ `test_deleting_a_run_leaves_no_evidence_or_attempt`。
+- 7.1 ✓ 宿主 `runner.py`：`session.harness_probe(PROBE_WORKSPACE_FILES)` → `harness_state`（:253/:295），agent 末条回复 → `subject_state`（:320）；整体落盘于本变更任务 1.5 的提交 `657c287`。
+- 7.2 ✓ 宿主环境 `probe(channel)` 两条通道；`test_probe_follows_the_current_trial_not_the_caller`（宿主 runner 测试 :615）实存并通过（本次宿主门禁 59 passed 含它）。
+- 7.3 ✓ 宿主 `graders/{artifact,dispatch}.py` 补 `evidence_levels` + `implementation_version`（dispatch.py:51/:87/:110，artifact.py:27/:49/:65/:75）。
+- 7.4 ✓ **库记录硬核实**：host `.agenthub-data/aeval.db` 中 `run_8ca076ca783a`（9 trial 全 valid、9 条证据行、18 条判定行）与首跑 `run_06a16595008a` 均实存；验收明细在 `host-migration/README.md` 与 Aeval 提交 `e85d279`/`4b4572a`；两个框架缺陷的回归用例即 `fix(orchestration)!`（`a8c9b70`）与 `fix(storage)`（`9005c0f`）。
+- 7.5 ✓ 宿主 `docs/eval-harness-design.md` §4.3 已是①修正口径（"口径 (change ① 修正)。旧草图…会把 3 次里蒙对 1 次读成 100%"），版本历史记 v0.16。`eval-harness-design-review.md` 里的旧代码段是**刻意保留**的历史审查快照（"缺陷 1 ✅ 已修复"标注属于当时记录），host-migration/README.md 有说明——不构成本条的虚标，但 see make-published-artifact-match-accepted-code 交接项 7.4 的处理决定。
+- 8.1 ✓ `regrade_state()`（"可读"与"可重评"分开判断）+ CLI `Regrade: no — <原因>` 行（cli.py:145-146）+ `test_legacy_run_is_readable_but_not_regradeable`。
+- 8.2 ✓ `test_legacy_trials_do_not_gain_verdicts_by_default`。
+- 9.1 ✓ integration-guide:212 起新契约图与最小实现。
+- 9.2 ✓ docs/grader-reference.md（allow_subject :14、判定时刻、弱证据 :109）。
+- 9.3 ✓ architecture.md 三相顺序（:83）与延迟评分（:75、§4.7 :166）。
+- 9.4 ✓ README.md:86 / README.zh-CN.md:85「采集与评分分离」；可声明不可强制：zh :84、en :85。
+- 9.5 ✓ docs/yaml-format.md（evidence/allow_subject/judgment_moment 与校验规则 :49-84）。
+- 10.1 ✓ 本次复跑 ruff 通过。10.2 ✓ 本次复跑 638 passed。10.3 ✓ 两个隔离测试在 638 内。
+- 10.4 N/A 确认成立：`git log 4fc28cf^..HEAD -- apps/dashboard` 为空，③ 确实未触及 dashboard，"未跑"标注如实。
+- 10.5 ✓ 本次复跑 `eval-suite run examples/minimal/suite.yaml`：6 trial 全 valid，输出带 `Evidence: runner=6` 与 `Regrade: available`。
+- 10.6 ✓ 本次复跑 `openspec validate separate-collection-from-grading --strict` 通过。
+- 10.7 ✓ design.md:172 留存策略待答项已由实测数据回答（默认口径约 2.1 KB/行；明文钩子 9.1 KB–223.7 KB）。
+
+结论：**49/49 勾选有据，10.4 的 N/A 标注成立，无虚标**。

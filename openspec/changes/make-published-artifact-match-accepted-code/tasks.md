@@ -2,21 +2,33 @@
 
 ## 1. 落盘成对改动（最高优先，先于一切）
 
-- [ ] 1.1 执行前重新读状态：`git -C Aeval-publish status --porcelain` 与 `git -C bitdance-agenthub-main status --porcelain`。**只按具体路径 add，禁止 `git add -A`** —— 这两个仓库存在并发提交者，已发生过"提交一半"
-- [ ] 1.2 Aeval 第 1 笔：提交主 spec 语料与归档移动 —— `openspec/specs/`、`openspec/changes/archive/`，以及 `openspec/changes/fix-stats-and-denominators/`、`align-trace-evidence/` 的删除（约 21 D + 2 个未跟踪目录）。建议消息：`chore(openspec): archive statistics and trace-evidence changes, lock 10-capability spec corpus`
-- [ ] 1.3 Aeval 第 2 笔：OpenInference 预设全套 —— `packages/agent-eval/src/agent_eval/{trace/mapping.py,trace/__init__.py,cli.py,api/app.py}`、`tests/{test_trace_normalization.py,test_cli.py,test_standalone_api.py}`、`docs/{integration-guide,architecture,cli-reference}.md`、`README.md`、`README.zh-CN.md`，加 `openspec/changes/add-openinference-mapping-preset/`。消息：`feat(trace-provider): ship selectable OpenInference mapping preset with meta and CLI selection`
-- [ ] 1.4 Aeval 第 3 笔：本变更目录 `make-published-artifact-match-accepted-code/` + ③ 遗留未提交项（若有）
-- [ ] 1.5 宿主一笔：③ 的迁移 —— `backend/app/eval_integration/{runner.py,environment.py,config.py,graders/artifact.py,graders/dispatch.py}` 与 `backend/tests/test_eval_integration_runner.py`。消息：`feat(eval-integration): migrate to evidence-provenance runner contract`。**只点这些路径**，宿主另有 20+ 个无关未提交改动
-- [ ] 1.6 验证配对着陆：`git -C Aeval-publish show HEAD:packages/agent-eval/src/agent_eval/core/contract.py | grep "def run"` 与宿主 `git show HEAD:backend/app/eval_integration/runner.py | grep "async def run"` —— 两边签名必须同为 `(view, session) -> TrialEvidence`，此前是"两个 HEAD 跑不通"
-- [ ] 1.7 两仓库门禁复跑：Aeval `PYTHONPATH=src pytest tests/ -q`（预期 634 passed）+ `ruff check packages/agent-eval`；宿主 `.venv/.../python -m pytest tests/test_eval_integration_* -q`（预期 57 passed）
-- [ ] 1.8 `.qoder/` 定去向：加进 `.gitignore`（倾向）或入库；二选一并提交
+- [x] 1.1 执行前重新读状态：`git -C Aeval-publish status --porcelain` 与 `git -C bitdance-agenthub-main status --porcelain`。**只按具体路径 add，禁止 `git add -A`** —— 这两个仓库存在并发提交者，已发生过"提交一半"
+  - 已重读。Aeval 侧 4 M 源码 + 3 M 测试 + 4 M 文档/README + 21 D + 5 个未跟踪路径；宿主侧 `separate-collection-from-grading` 已被并发会话提交入库（本清单未把它列为待提交项，相符）。
+- [x] 1.2 Aeval 第 1 笔：提交主 spec 语料与归档移动 —— `openspec/specs/`、`openspec/changes/archive/`，以及 `openspec/changes/fix-stats-and-denominators/`、`align-trace-evidence/` 的删除（约 21 D + 2 个未跟踪目录）。建议消息：`chore(openspec): archive statistics and trace-evidence changes, lock 10-capability spec corpus`
+  - 提交 `efab9f1`，31 files，21 个 rename 全部被 git 识别为 R（100% 相似度，tasks.md 87%）。
+- [x] 1.3 Aeval 第 2 笔：OpenInference 预设全套 —— `packages/agent-eval/src/agent_eval/{trace/mapping.py,trace/__init__.py,cli.py,api/app.py}`、`tests/{test_trace_normalization.py,test_cli.py,test_standalone_api.py}`、`docs/{integration-guide,architecture,cli-reference}.md`、`README.md`、`README.zh-CN.md`，加 `openspec/changes/add-openinference-mapping-preset/`。消息：`feat(trace-provider): ship selectable OpenInference mapping preset with meta and CLI selection`
+  - 提交 `af0241d`，15 files。**README.zh-CN.md 无改动**（不在 status 里），故未包含——不是漏加。
+- [x] 1.4 Aeval 第 3 笔：本变更目录 `make-published-artifact-match-accepted-code/` + ③ 遗留未提交项（若有）
+  - 提交 `200c217`。③ 遗留项为零：`separate-collection-from-grading/` 已在库（10 个文件被并发会话提交），本笔只含本变更目录 4 个文件。
+- [x] 1.5 宿主一笔：③ 的迁移 —— `backend/app/eval_integration/{runner.py,environment.py,config.py,graders/artifact.py,graders/dispatch.py}` 与 `backend/tests/test_eval_integration_runner.py`。消息：`feat(eval-integration): migrate to evidence-provenance runner contract`。**只点这些路径**，宿主另有 20+ 个无关未提交改动
+  - 提交 `657c287`（分支 `feat-add-eval-harness`），7 files。**多含一个 `backend/eval_suites/first-suite.yaml`**：其 diff 是把 file-creation 判据从 code_based/outcome 换成 state_check/harness 证据，注释明说"③ 之后那份读数走取证通道，不再出现在 outcome 里，故判据必须换"——不带上它，落盘后的 suite 对新契约是坏的。其余未点：`test_zz_probe.py` 的删除是 neo4j Settings 调试探针清理，与 ③ 无关，不带入。
+- [x] 1.6 验证配对着陆：`git -C Aeval-publish show HEAD:packages/agent-eval/src/agent_eval/core/contract.py | grep "def run"` 与宿主 `git show HEAD:backend/app/eval_integration/runner.py | grep "async def run"` —— 两边签名必须同为 `(view, session) -> TrialEvidence`，此前是"两个 HEAD 跑不通"
+  - Aeval `contract.py`：`async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence:`；宿主 `runner.py`：`async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence:`。两个 HEAD 现在配对。
+- [x] 1.7 两仓库门禁复跑：Aeval `PYTHONPATH=src pytest tests/ -q`（预期 634 passed）+ `ruff check packages/agent-eval`；宿主 `.venv/.../python -m pytest tests/test_eval_integration_* -q`（预期 57 passed）
+  - Aeval：**638 passed**（比提案时多 4 个：并发会话为 preset 补了测试）+ ruff All checks passed。宿主：**59 passed**（比预期多 2，同为并发新增），无失败。
+- [x] 1.8 `.qoder/` 定去向：加进 `.gitignore`（倾向）或入库；二选一并提交
+  - 取倾向项：内容仅 Qoder 编辑器的 commands/skills 本地状态，提交 `1811c71`。Aeval 工作树自此干净。
 
 ## 2. 逐条核对已勾任务（不信清单）
 
-- [ ] 2.1 `add-openinference-mapping-preset/tasks.md`：25 条逐条给结论。**已知偏差**：清单称 5 条未办，实测其中 2.2 / 2.3 / 5.1 / 5.2 已完成（`/v1/meta` 有 `vocabularies`、`--vocabulary`、`AEVAL_TRACE_VOCABULARY`、README Features 有整段）→ 改正勾选并注明依据
-- [ ] 2.2 `separate-collection-from-grading/tasks.md`：50 条由并发会话勾选，逐条找可指认的用例或命令输出。**重点四处**：来源三级取信、判定时刻（`一次取证 = 一个时刻`，提交 `a8c9b70`）、重评永不覆盖且 `current` 指针可从列读回（提交 `9005c0f`）、宿主迁移与实跑记录（提交 `e85d279`、`4b4572a`）
-- [ ] 2.3 虚标处理：任何找不到证据的勾选项**改回未勾**并在条目下写明缺什么；不为了让清单好看而保留
-- [ ] 2.4 确认 `10.4`（dashboard build）标注是否成立：若 ③ 确实未触及 `apps/dashboard`，记 N/A 并说明；否则补跑
+- [x] 2.1 `add-openinference-mapping-preset/tasks.md`：25 条逐条给结论。**已知偏差**：清单称 5 条未办，实测其中 2.2 / 2.3 / 5.1 / 5.2 已完成（`/v1/meta` 有 `vocabularies`、`--vocabulary`、`AEVAL_TRACE_VOCABULARY`、README Features 有整段）→ 改正勾选并注明依据
+  - 逐条结论已附在该 tasks.md 末尾。发现清单在提案后被并发会话改正过（4 条"未办"已勾上并注明依据），本次逐条独立复核：23/25 有据；**4.3 虚标，改回未勾**（6 条真实 Phoenix trace 的回归无持久记录、Phoenix 不在线无法复跑，理由写在条目下）；4.4 本就未勾正确。
+- [x] 2.2 `separate-collection-from-grading/tasks.md`：50 条由并发会话勾选，逐条找可指认的用例或命令输出。**重点四处**：来源三级取信、判定时刻（`一次取证 = 一个时刻`，提交 `a8c9b70`）、重评永不覆盖且 `current` 指针可从列读回（提交 `9005c0f`）、宿主迁移与实跑记录（提交 `e85d279`、`4b4572a`）
+  - 逐条结论已附在该 tasks.md 末尾：49/49 勾选有据。重点四处各自落定：三级取信有 `test_same_evidence_three_declarations` 等参数化用例；判定时刻有 `a8c9b70` + `test_created_then_deleted_fails_at_end_and_passes_any_time`；重评不覆盖有 `9005c0f` + `test_regrade_appends_and_moves_the_current_pointer`；宿主实跑用 host `.agenthub-data/aeval.db` 硬核实（`run_8ca076ca783a` 9 trial 全 valid、9 条证据行、18 条判定行，首跑 `run_06a16595008a` 亦在）。
+- [x] 2.3 虚标处理：任何找不到证据的勾选项**改回未勾**并在条目下写明缺什么；不为了让清单好看而保留
+  - 共发现一处：preset 4.3，已改回未勾并写明缺口（无持久命令输出、当前无法复现）与补救路径（Phoenix 在线时补跑）。③ 侧零虚标。
+- [x] 2.4 确认 `10.4`（dashboard build）标注是否成立：若 ③ 确实未触及 `apps/dashboard`，记 N/A 并说明；否则补跑
+  - 成立：`git log 4fc28cf^..HEAD -- apps/dashboard` 为空，③ 的 6 个提交无一触及 dashboard；维持"未跑"的 N/A 标注（不是"跑绿"）。
 - [ ] 2.5 未办的 `4.4`（宿主活跑，会产生真实 agent 调用）：需用户授权后执行，判据是 9 trial 仍全部 `valid` 且结论带最弱证据级别标注
 
 ## 3. 归档两个 change
