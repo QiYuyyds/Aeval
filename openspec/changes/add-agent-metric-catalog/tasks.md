@@ -58,8 +58,13 @@
 > （provider 不交付属性 / token 分桶 / 进程 locality），④ 的四类新机制（judge 看轨迹、
 > 诊断轴、κ/α、乘性门）不验真流量就不许归档，同理。
 
-- [ ] 8.1 宿主新增验收套件：真用 `type: metric` 判据（judge 声明读轨迹）+ `reward_basis: multiplicative` 安全门（真流量上可能失败的门，如产物禁含密钥类内容）+ ≥2 个独立 judge 定义产 κ/α 数据；`eval-suite validate` 通过
-- [ ] 8.2 宿主 venv 临时切回 editable（本变更已提交的 0.3.0 树；PyPI 上没有 0.3.0）——验收后随发版切回 `==0.3.0`
+- [x] 8.1 宿主新增验收套件：真用 `type: metric` 判据（judge 声明读轨迹）+ `reward_basis: multiplicative` 安全门（真流量上可能失败的门，如产物禁含密钥类内容）+ ≥2 个独立 judge 定义产 κ/α 数据；`eval-suite validate` 通过
+  - 完成（宿主提交 `2fd94ca`）：`metric-acceptance-suite.yaml`（全量：`process_quality` 轨迹指标 + lenient/strict 双 rater 阈值 0.3/0.9 产 κ/α + factor=0.0 `not_contains` 泄密门 + answer_relevancy 仅诊断）VALID；配套宿主自有轨迹指标 `app/eval_integration/metrics.py::ProcessQualityMetric`（`evidence_levels=("transcript",)`，注册进 runner registry——内置指标无一读轨迹，轨迹注入必须宿主自建才有真流量路径）；`run_first_suite.py` 参数化套件路径。第 1 轮门优先变体 `metric-acceptance-gateonly.yaml` 亦 VALID。
+- [x] 8.2 宿主 venv 临时切回 editable（本变更已提交的 0.3.0 树；PyPI 上没有 0.3.0）——验收后随发版切回 `==0.3.0`
+  - 已执行：uninstall PyPI 0.2.0 → `pip install -e` 指向本仓库已提交的 0.3.0 树，`pip show` 确认。
 - [ ] 8.3 取得用户授权：真实 agent 调用 + judge 的真实 LLM 调用（多 judge 使 judge 调用量 ≥2×，成本预估先行）
+  - 状态（2026-09-06）：用户授权了真实 agent 调用；**judge 的 LLM 调用被用户暂缓**（`.env` 无 `AEVAL_JUDGE_API_KEY` / `EVAL_LLM_API_KEY` / `OPENAI_API_KEY`，未提供）。随后宿主栈（Docker/Postgres/后端/Phoenix）下线，用户决定**活跑整体暂缓**。
 - [ ] 8.4 真流量活跑：记录 run id；验证诊断块不进分母、门因子塌缩、κ/α 在真实 trace 上与单测语义一致；report/API 可读
+  - 第 1 轮（门优先，无 judge，3 次 agent 调用）：套件与脚本就绪，未跑——等宿主栈恢复。
+  - 第 2 轮（全量 judge：κ/α + 轨迹注入 + 诊断块）：等 8.3 的 judge 凭据与授权。
 - [ ] 8.5 结果写回本清单（勾选 + run id + 判读）；发现缺陷先修复再归档——本组完成是 `openspec archive add-agent-metric-catalog` 的前置条件
