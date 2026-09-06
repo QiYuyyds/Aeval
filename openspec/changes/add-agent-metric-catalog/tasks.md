@@ -51,3 +51,15 @@
 - [x] 7.3 `tests/test_import_isolation.py` 与 `tests/test_vocabulary_isolation.py` 仍通过
 - [x] 7.4 离线 `eval-suite run examples/minimal/suite.yaml` 正常产出，报告出现诊断块且分母与 0.2.0 一致
 - [x] 7.5 `openspec validate add-agent-metric-catalog --strict` 通过
+
+## 8. 宿主真流量验收（归档前置；本组是 ④ 的唯一真验收）
+
+> 补记（2026-09-06）：原清单漏写活跑项——①②③ 的致命缺陷全部是单测绿、活跑暴露
+> （provider 不交付属性 / token 分桶 / 进程 locality），④ 的四类新机制（judge 看轨迹、
+> 诊断轴、κ/α、乘性门）不验真流量就不许归档，同理。
+
+- [ ] 8.1 宿主新增验收套件：真用 `type: metric` 判据（judge 声明读轨迹）+ `reward_basis: multiplicative` 安全门（真流量上可能失败的门，如产物禁含密钥类内容）+ ≥2 个独立 judge 定义产 κ/α 数据；`eval-suite validate` 通过
+- [ ] 8.2 宿主 venv 临时切回 editable（本变更已提交的 0.3.0 树；PyPI 上没有 0.3.0）——验收后随发版切回 `==0.3.0`
+- [ ] 8.3 取得用户授权：真实 agent 调用 + judge 的真实 LLM 调用（多 judge 使 judge 调用量 ≥2×，成本预估先行）
+- [ ] 8.4 真流量活跑：记录 run id；验证诊断块不进分母、门因子塌缩、κ/α 在真实 trace 上与单测语义一致；report/API 可读
+- [ ] 8.5 结果写回本清单（勾选 + run id + 判读）；发现缺陷先修复再归档——本组完成是 `openspec archive add-agent-metric-catalog` 的前置条件
