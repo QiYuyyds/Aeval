@@ -1,6 +1,6 @@
 # 架构
 
-Aeval 是一个由 OTel trace 驱动的 Agent 评测框架：取证按 OTel GenAI 语义约定的词汇读入，宿主的私有属性名经翻译表接入。本文描述它的模块划分、执行数据流与扩展点设计。
+Aeval 是一个由 OTel trace 驱动的 Agent 评测框架：取证经一张版本钉定的翻译表读入，内置条目是**可按名字选的公共约定预设**（OTel GenAI / OpenInference），宿主的私有属性名只能作为运行时条目叠在预设上。本文描述它的模块划分、执行数据流与扩展点设计。
 
 ## 1. 定位
 
@@ -26,7 +26,7 @@ agent_eval/
 ├── dataset/        # 数据集构建 (5 类数据源/质量检查/覆盖度/semver 升版)
 ├── storage/        # Memory + SQLite (runs/suites/人工评分请求 + trial_evidence/grade_attempts 两张派生表)
 ├── trace/          # 归一化边界
-│   ├── mapping.py    #   属性翻译表 (内置条目对齐 OTel GenAI + 版本常量) + default_mapping()
+│   ├── mapping.py    #   属性翻译表 (内置条目 = 可选公共约定预设: OTel GenAI / OpenInference + 版本常量) + default_mapping(vocabulary)
 │   ├── normalize.py  #   span → 标准观测 (唯一读原始属性名的地方) + collect_observations()
 │   ├── observations.py # 标准观测记录 / Missing 与缺失原因枚举
 │   └── phoenix.py    #   Phoenix TraceProvider (懒加载)
@@ -38,7 +38,7 @@ agent_eval/
 
 ## 3. 执行数据流
 
-**归一化边界**：span 只在进入框架的那一刻被翻译一次（`trace/normalize.py`），此后指标提取、内置评分器、汇总与呈现消费的都是词汇无关的标准观测。框架源码里不存在任何宿主的私有属性名——它们只能是运行时注入的映射条目。读不到的字段是带原因的「缺失」，与真实零值不混同（`Missing` 不许当布尔用）。
+**归一化边界**：span 只在进入框架的那一刻被翻译一次（`trace/normalize.py`），此后指标提取、内置评分器、汇总与呈现消费的都是词汇无关的标准观测。内置条目覆盖两套**公共**埋点约定（OTel GenAI 与 OpenInference），按名字选一套，默认仍是 OTel GenAI；框架源码里不存在任何宿主的私有属性名——它们只能是叠在预设之上、运行时注入的映射条目。读不到的字段是带原因的「缺失」，与真实零值不混同（`Missing` 不许当布尔用）。
 
 ```
 suite.yaml ──load──▶ EvalSuite
@@ -192,7 +192,7 @@ task 与 run 两级汇总都输出 `termination_reasons` 分布计数（不折�
 
 **结构兼容不豁免口径声明**：同一大版本内数值的语义仍可能变化（如 v0.1.0 → v0.1.1 的统计口径修正），因此两种形态都经元信息接口公布当前口径：寄宿形态 `GET <prefix>/meta`，独立形态 `GET /v1/meta`，响应含 `statistics.version` 与 `confidence_level` / `bootstrap_rounds` / `min_valid_trials_for_saturation` / `gate_invalid_ratio_limit` 四个默认值。每个落盘 run 另在 `statistics_version` 上记录产出它时所用的版本，调用方据此判断两个 run 是否可比。
 
-同一份元信息还公布**证据口径**：`spec_version`（钉住的 OTel GenAI 版本）、`mapping_version`（翻译表自身版本）、`tool_arguments_captured_by_default: false`、`model_content_captured_by_default: false`，以及能力位 `regrade_over_http: false` / `regrade_over_cli: false`（重评分本期只有库层入口）。每个 run 另在 `evidence` 里落盘自己当时的证据边界（两类采集开关及逐 task 差异、`allow_subject` 放行清单、规范与映射版本、脱敏处理标识与版本），run 详情与列表再附一个 `regrade: {available, reason, exposed_over_http: false}`：本变更前落盘的 run 在此明确读出「不可重评」及其原因，而不是被静默当成等价数据。对比接口的可比判定要同时过两道：统计口径相同 **且** 证据边界相同，否则 `not_comparable_reason` 会点名是哪一维不同（缺边界记录的历史 run 一律视为不可直接比较，而不是假定与今天同边界）。
+同一份元信息还公布**证据口径**：`spec_version`（默认预设钉住的 OTel GenAI 版本）、`mapping_version`（翻译表自身版本）、`vocabularies`（可选的 trace 属性词汇预设：`default` + `known` + 各预设钉住的 `spec_versions`，调用方据此选词汇而不必读源码）、`tool_arguments_captured_by_default: false`、`model_content_captured_by_default: false`，以及能力位 `regrade_over_http: false` / `regrade_over_cli: false`（重评分本期只有库层入口）。每个 run 另在 `evidence` 里落盘自己当时的证据边界（两类采集开关及逐 task 差异、`allow_subject` 放行清单、规范与映射版本、脱敏处理标识与版本），run 详情与列表再附一个 `regrade: {available, reason, exposed_over_http: false}`：本变更前落盘的 run 在此明确读出「不可重评」及其原因，而不是被静默当成等价数据。对比接口的可比判定要同时过两道：统计口径相同 **且** 证据边界相同，否则 `not_comparable_reason` 会点名是哪一维不同（缺边界记录的历史 run 一律视为不可直接比较，而不是假定与今天同边界）。
 
 ## 6. 扩展点
 
@@ -200,7 +200,7 @@ task 与 run 两级汇总都输出 `termination_reasons` 分布计数（不折�
 
 - `AgentRunner`（必选）— 执行任务并**交付带来源的证据**：`run(view: TaskView, session: TrialSession) -> TrialEvidence`；`emit` 与运行中探针都是可选的递进能力
 - `TraceProvider` — 从 trace 后端拉 span 数据
-- `AttributeMapping` — span 属性名 → 标准观测的翻译表（`default_mapping(extra)` 注入宿主词汇）；换表即换证据边界，历史 run 因记录了当时版本而不被误判为同口径
+- `AttributeMapping` — span 属性名 → 标准观测的翻译表（`default_mapping(extra, vocabulary=...)`：`vocabulary` 选一套内置公共约定预设（`otel-genai` / `openinference`，`known_vocabularies()` 可枚举），`extra` 只叠宿主私有词汇）；换表即换证据边界，历史 run 因记录了当时的映射版本与所依据的规范修订号而不被误判为同口径
 - `EvidenceRedactor` — 采集开启时强制应用的脱敏处理（整体替换，不叠加默认实现）；标识与版本随 run 落盘，审计看得见「谁换掉了默认摘要」
 - `PriceTable` — 成本折算的单价表（外部配置，无内置价目）；换价表会改变 `cost_usd`，故不配置时宁可不报
 - `Grader` — 逐 trial 评分（`EvalContext` 贯穿共享状态；`context.observations` 是已归一化的标准观测，`context.evidence` 是按本判据 `evidence` 声明过滤后的证据视图）。声明 `evidence_levels` 与 `implementation_version` 后，结论可被审计到「依据哪几级、由哪一版判的」

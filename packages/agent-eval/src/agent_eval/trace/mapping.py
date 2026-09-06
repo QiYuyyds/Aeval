@@ -2,9 +2,10 @@
 属性翻译表: 把任意埋点词汇的 span 归一化为标准观测 (capability: trace-provider)。
 
 框架源码里 MUST NOT 出现任何宿主的私有属性名 —— 它们一律是运行时注入的映射条目
-(``AttributeMapping.with_extra``), 加一个宿主 = 加一条表项。内置条目对齐 OTel GenAI
-语义约定, 该规范已整体迁出主仓库且除 ``error.type`` 外全部处于 Development 稳定性,
-因此版本被钉死在常量里并随 run 落盘, 使历史数据可判断是否同口径。
+(``AttributeMapping.with_extra``), 加一个宿主 = 加一条表项。内置条目是**可按名字选的
+公共约定预设** (``default_mapping(vocabulary=...)``): 默认 OTel GenAI, 另有
+OpenInference —— 后者是 Phoenix 一类后端实际导出的名字。每个预设把它取号所依据的
+规范修订号钉在常量里并随 run 落盘, 使历史数据可判断是否同口径。
 """
 
 from __future__ import annotations
@@ -137,22 +138,30 @@ OPENINFERENCE_FIELD_OVERRIDES: dict[str, tuple[str, ...]] = {
 }
 
 
+# 每个预设钉住的规范修订号: 选哪个词汇 = 按哪一版公共约定读数据。
+# 能力清单据此公布可选预设, 调用方不必读源码就能列出可填的值。
+VOCABULARY_SPEC_VERSIONS: dict[str, str] = {
+    VOCABULARY_OTEL_GENAI: OTEL_GENAI_SPEC_VERSION,
+    VOCABULARY_OPENINFERENCE: OPENINFERENCE_SPEC_VERSION,
+}
+
+
 def known_vocabularies() -> tuple[str, ...]:
-    """可选的公共约定预设 (供 CLI、能力清单与人发现)。"""
-    return (VOCABULARY_OTEL_GENAI, VOCABULARY_OPENINFERENCE)
+    """可选的公共约定预设 (供 CLI、能力清单与人发现); 默认值在前。"""
+    return tuple(VOCABULARY_SPEC_VERSIONS)
 
 
 def _preset(vocabulary: str) -> tuple[dict[str, tuple[str, ...]], str]:
     """解析词汇预设 → (候选条目表, 规范修订号)。"""
     if vocabulary == VOCABULARY_OTEL_GENAI:
-        return dict(DEFAULT_FIELD_ATTRIBUTES), OTEL_GENAI_SPEC_VERSION
+        return dict(DEFAULT_FIELD_ATTRIBUTES), VOCABULARY_SPEC_VERSIONS[vocabulary]
 
     if vocabulary == VOCABULARY_OPENINFERENCE:
         merged = dict(DEFAULT_FIELD_ATTRIBUTES)
         for field_name, names in OPENINFERENCE_FIELD_OVERRIDES.items():
             existing = tuple(n for n in merged.get(field_name, ()) if n not in names)
             merged[field_name] = names + existing  # 新约定优先, 默认名兜底
-        return merged, OPENINFERENCE_SPEC_VERSION
+        return merged, VOCABULARY_SPEC_VERSIONS[vocabulary]
 
     # 静默退回默认表会产出一整套「看似正常、实则全空」的观测, 比直接失败更难查。
     raise ValueError(

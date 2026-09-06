@@ -48,6 +48,19 @@ class TestStandaloneAPI:
         assert stats["min_valid_trials_for_saturation"] == 5
         assert stats["gate_invalid_ratio_limit"] == 0.2
 
+    def test_meta_publishes_vocabulary_presets(self):
+        """可选词汇预设必须可被调用方枚举 (不必读源码猜字符串)。"""
+        from agent_eval.trace.mapping import VOCABULARY_SPEC_VERSIONS, known_vocabularies
+
+        with _client() as client:
+            evidence = client.get("/v1/meta").json()["evidence"]
+
+        assert evidence["vocabularies"]["known"] == list(known_vocabularies())
+        assert evidence["vocabularies"]["default"] == "otel-genai"
+        assert evidence["vocabularies"]["spec_versions"] == VOCABULARY_SPEC_VERSIONS
+        # 既有键语义不变: 仍是「不选词汇时按哪一版约定读」
+        assert evidence["spec_version"] == VOCABULARY_SPEC_VERSIONS["otel-genai"]
+
     def test_run_routes_503_without_runner(self):
         with _client() as client:
             resp = client.post("/v1/runs", json={"suite_name": "s"})

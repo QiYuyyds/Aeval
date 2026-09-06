@@ -31,7 +31,13 @@ from agent_eval.core.types import (
     STATISTICS_VERSION,
 )
 from agent_eval.graders import get_grader_catalog
-from agent_eval.trace.mapping import ATTRIBUTE_MAPPING_VERSION, OTEL_GENAI_SPEC_VERSION
+from agent_eval.trace.mapping import (
+    ATTRIBUTE_MAPPING_VERSION,
+    OTEL_GENAI_SPEC_VERSION,
+    VOCABULARY_OTEL_GENAI,
+    VOCABULARY_SPEC_VERSIONS,
+    known_vocabularies,
+)
 
 # Global runner reference (set by create_app)
 _runner: EvalRunner | None = None
@@ -100,6 +106,13 @@ def meta_payload(
         "evidence": {
             "spec_version": OTEL_GENAI_SPEC_VERSION,
             "mapping_version": ATTRIBUTE_MAPPING_VERSION,
+            # default_mapping(vocabulary=...) 的可填值在这里枚举: 调用方不需要读
+            # 源码猜词汇, 也不需要为了发现一个字符串去 import 内部模块。
+            "vocabularies": {
+                "default": VOCABULARY_OTEL_GENAI,
+                "known": list(known_vocabularies()),
+                "spec_versions": dict(VOCABULARY_SPEC_VERSIONS),
+            },
             "tool_arguments_captured_by_default": False,
             "model_content_captured_by_default": False,
             "capture_is_one_declaration": True,

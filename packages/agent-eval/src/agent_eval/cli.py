@@ -18,6 +18,11 @@ Runner selection (run): --runner option > AEVAL_RUNNER env var > "mock".
 Custom runners register via the "agent_eval.runners" entry-point group
 (name → zero-arg factory returning an AgentRunner).
 
+Trace vocabulary (run): --vocabulary option > AEVAL_TRACE_VOCABULARY env var >
+"otel-genai". The value selects a built-in public-convention preset
+(agent_eval.trace.known_vocabularies()); host-private attribute names still go
+in through default_mapping(extra_entries) in library code, never through the CLI.
+
 Storage (list/show/compare and run persistence): SQLite, ./aeval.db by
 default; override with --db or the AEVAL_DB environment variable.
 """
@@ -31,6 +36,11 @@ from datetime import datetime
 import typer
 
 from agent_eval.core.types import DEFAULT_INVALID_RATIO_LIMIT
+from agent_eval.trace.mapping import (
+    VOCABULARY_OTEL_GENAI,
+    VOCABULARY_SPEC_VERSIONS,
+    known_vocabularies,
+)
 
 DEFAULT_DB = "./aeval.db"
 RUNNERS_ENTRY_POINT_GROUP = "agent_eval.runners"
@@ -58,6 +68,11 @@ def _format_ts(ms: float | None) -> str:
 
 
 INSUFFICIENT_LABEL = "insufficient_data"
+
+# 词汇预设的展示形态: 名字 + 各自钉住的规范修订号 (选词汇 = 选读证据的口径)
+VOCABULARY_CHOICES = ", ".join(
+    f"{name} (spec {VOCABULARY_SPEC_VERSIONS[name]})" for name in known_vocabularies()
+)
 
 
 def _k_display(d: dict) -> list[tuple[int, float | None]]:
@@ -268,6 +283,12 @@ def run(
         envvar="AEVAL_RUNNER",
         help="AgentRunner 名称 (内置 mock, 或 agent_eval.runners entry-point 注册名)",
     ),
+    vocabulary: str = typer.Option(
+        VOCABULARY_OTEL_GENAI,
+        "--vocabulary",
+        envvar="AEVAL_TRACE_VOCABULARY",
+        help=f"trace 属性词汇预设 (公共埋点约定): {VOCABULARY_CHOICES}",
+    ),
     db: str | None = typer.Option(
         None, "--db", envvar="AEVAL_DB", help="SQLite 结果库路径 (默认 ./aeval.db)"
     ),
@@ -289,6 +310,7 @@ def run(
     """
     from agent_eval.core.runner import EvalRunner
     from agent_eval.core.suite import SuiteLoadError, load_suite
+    from agent_eval.trace.mapping import default_mapping
 
     try:
         suite = load_suite(suite_path)
@@ -300,10 +322,22 @@ def run(
         typer.echo("error: --trials must be >= 1", err=True)
         raise typer.Exit(code=2)
 
+    # 装配期就把词汇定死: 拼错的预设必须失败, 静默退回默认表会跑出一整轮
+    # 「看似正常、实则全是证据缺失」的观测, 比直接报错难查得多。
+    try:
+        trace_mapping = default_mapping(vocabulary=vocabulary)
+    except ValueError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
+
     max_trials = trials or max(t.max_trials for t in suite.tasks)
     typer.echo(
         f"Starting eval run: {suite.name} v{suite.version} "
         f"({len(suite.tasks)} tasks, up to {max_trials} trials each)"
+    )
+    typer.echo(
+        f"Trace vocabulary: {vocabulary}  spec={trace_mapping.spec_version}  "
+        f"mapping={trace_mapping.version}"
     )
 
     agent_runner = _resolve_agent_runner(runner)
@@ -313,6 +347,7 @@ def run(
         agent_runner=agent_runner,
         trace_provider=_trace_provider_for(agent_runner),
         storage=storage,
+        trace_mapping=trace_mapping,
         **({"concurrency": concurrency} if concurrency else {}),
     )
 

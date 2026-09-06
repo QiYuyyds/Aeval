@@ -199,6 +199,39 @@ class TestRun:
         assert result.exit_code == 2
         assert "unknown runner" in result.output
 
+    def test_run_echoes_the_selected_trace_vocabulary(self, tmp_path):
+        """选中的词汇与其钉住的规范修订必须可见 —— 数字是在哪套约定上读的要能复核。"""
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                _suite(tmp_path, SUITE_PASS),
+                "--vocabulary",
+                "openinference",
+                "--db",
+                str(tmp_path / "aeval.db"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Trace vocabulary: openinference" in result.output
+        assert "spec=openinference-0.1.30" in result.output
+
+    def test_unknown_vocabulary_exits_two_before_running(self, tmp_path):
+        result = runner.invoke(
+            app,
+            [
+                "run",
+                _suite(tmp_path, SUITE_PASS),
+                "--vocabulary",
+                "open-infrence",
+                "--db",
+                str(tmp_path / "a.db"),
+            ],
+        )
+        assert result.exit_code == 2
+        assert "otel-genai" in result.output and "openinference" in result.output
+        assert "Starting eval run" not in result.output
+
     def test_invalid_suite_file_exits_nonzero_before_running(self, tmp_path):
         result = runner.invoke(
             app,

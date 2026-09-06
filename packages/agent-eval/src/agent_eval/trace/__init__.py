@@ -19,8 +19,10 @@ Usage:
 from agent_eval.trace.mapping import (
     ATTRIBUTE_MAPPING_VERSION,
     OTEL_GENAI_SPEC_VERSION,
+    VOCABULARY_SPEC_VERSIONS,
     AttributeMapping,
     default_mapping,
+    known_vocabularies,
 )
 from agent_eval.trace.normalize import collect_observations, normalize_spans
 from agent_eval.trace.observations import (
@@ -40,6 +42,8 @@ __all__ = [
     "default_mapping",
     "OTEL_GENAI_SPEC_VERSION",
     "ATTRIBUTE_MAPPING_VERSION",
+    "known_vocabularies",
+    "VOCABULARY_SPEC_VERSIONS",
     "normalize_spans",
     "collect_observations",
     "NormalizedTrace",

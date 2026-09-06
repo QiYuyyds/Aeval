@@ -18,10 +18,11 @@ eval-suite run <suite.yaml> [选项]
 | `--trials N` | 用 suite 配置 | 覆盖每个任务的 trial 数 |
 | `--concurrency N` | 1（串行） | trial 并发数 |
 | `--runner NAME` | `mock` | AgentRunner；也读环境变量 `AEVAL_RUNNER` |
+| `--vocabulary NAME` | `otel-genai` | trace 属性词汇预设（可选值见接入指南 §3）；也读 `AEVAL_TRACE_VOCABULARY`，写错在装配期报错 |
 | `--db PATH` | `./aeval.db` | 结果 SQLite 路径；也读 `AEVAL_DB` |
 | `--invalid-limit RATIO` | `0.2` | 可接受的 `invalid` trial 占比上限（`0.0`–`1.0`），超过以退出码 3 结束 |
 
-行为：加载校验 suite → 解析 runner → 执行 → 打印汇总（统计口径版本 / pass@k 及其区间 / pass^k / 平均分与 `worst_of_n` / `valid`·`invalid`·`pending` 分母 / 失败任务清单）。
+行为：加载校验 suite → 装配 trace 映射与 runner → 执行 → 打印汇总（统计口径版本 / pass@k 及其区间 / pass^k / 平均分与 `worst_of_n` / `valid`·`invalid`·`pending` 分母 / 失败任务清单）。开头回显 `Trace vocabulary: NAME  spec=…  mapping=…`，即这一轮数字是按哪套埋点约定读出来的。
 
 退出码（评测可信度条件**先于** agent 表现结论判定 —— 不可信的分数不参与放行）：
 
@@ -29,7 +30,7 @@ eval-suite run <suite.yaml> [选项]
 |----|------|
 | 0 | 放行：无评测侧问题且无未通过任务 |
 | 1 | agent 表现：存在未通过任务（或 suite 加载失败） |
-| 2 | 用法错误：runner 未知等参数问题 |
+| 2 | 用法错误：runner 或 `--vocabulary` 未知等参数问题 |
 | 3 | **评测本身不可信**：`invalid` 占比超 `--invalid-limit`，或关键统计量为 `insufficient_data`（无有效 trial 进入分母） |
 
 退出码 3 输出 `NOT PASSABLE - evaluation reliability problem (not an agent performance result)` 并逐条列出原因：它是评测配置的故障，**不是** agent 退化的结论，因此不复用退出码 1。
@@ -110,7 +111,7 @@ eval-suite serve [--host 127.0.0.1] [--port 8000]
 
 - 全部评测路由挂 **`/v1`** 前缀（`/v1/suites`、`/v1/runs`、`/v1/graders`、`/v1/compare`、`/v1/datasets`、`/v1/metrics`、`/v1/health`）
 - 每个响应带 `X-Aeval-Version` 头
-- `GET /v1/meta` 返回版本、能力清单与**统计口径**（`statistics.version` 及四个数值默认值）；寄宿挂载形态下同一份信息经 `<prefix>/meta` 取得
+- `GET /v1/meta` 返回版本、能力清单、**统计口径**（`statistics.version` 及四个数值默认值）与**证据口径**（`evidence.spec_version` / `mapping_version`，以及 `evidence.vocabularies`：可选的 trace 词汇预设、默认值与各自钉住的规范修订号）；寄宿挂载形态下同一份信息经 `<prefix>/meta` 取得
 - **默认仅监听本机回环地址**（对外暴露请显式 `--host 0.0.0.0` 并自行考虑访问控制）
 
 注意：`serve` 不注入 AgentRunner，run 类操作返回 503 —— 需要真实执行时用 Python 侧 `create_standalone_app(runner=...)` 或寄宿挂载。
@@ -120,4 +121,5 @@ eval-suite serve [--host 127.0.0.1] [--port 8000]
 | 变量 | 作用 |
 |------|------|
 | `AEVAL_RUNNER` | `run` 的默认 runner 名 |
+| `AEVAL_TRACE_VOCABULARY` | `run` 的默认 trace 属性词汇预设 |
 | `AEVAL_DB` | 结果 SQLite 默认路径 |

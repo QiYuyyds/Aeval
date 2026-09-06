@@ -127,22 +127,40 @@ span 数据用于：过程指标提取（`tracked_metrics`）、`tool_calls` / `
 
 `TraceProvider` 交回的 span 先经一次属性翻译，得到词汇无关的**标准观测**（工具名、调用成败、token 四分解、时延、会话标识、agent 名称与版本…），内置评分器与指标只消费标准观测，**不再看 span 名称，也不认识任何宿主的私有属性名**。翻译只做一次，因此加一个宿主 = 加一条表项，不改框架源码也不改评分器。
 
-内置条目对齐 OTel GenAI 语义约定。该规范已迁出主仓库、除 `error.type` 外全部处于 Development 稳定性且尚无 tagged release，所以版本钉死在 `agent_eval.trace.mapping.OTEL_GENAI_SPEC_VERSION`（当前 `genai-94f432d`）并随 run 落盘：
+内置条目覆盖**两套公共埋点约定**，按名字选一套。默认那套对齐 OTel GenAI 语义约定；该规范已迁出主仓库、除 `error.type` 外全部处于 Development 稳定性且尚无 tagged release，所以版本钉死在 `agent_eval.trace.mapping.OTEL_GENAI_SPEC_VERSION`（当前 `genai-94f432d`）并随 run 落盘：
+
+| 预设 | 什么时候选它 | 规范修订号 |
+|------|-------------|-----------|
+| `otel-genai`（默认） | 用 OTel GenAI SDK / `gen_ai.*` 属性名埋点 | `genai-94f432d` |
+| `openinference` | 用 Phoenix 或任何 OpenInference instrumentation 埋点（属性名是 `llm.token_count.*`、`llm.model_name`、`session.id`、`openinference.span.kind`…） | `openinference-0.1.30` |
+
+**不指定词汇时行为与本变更前逐字一致**；选了 `openinference` 之后，它的属性名排在候选首位、`gen_ai.*` 仍留在后面兜底，所以一个正在从旧约定迁到新约定的应用，两种埋点都能读到。每个 run 记录自己当时生效的规范修订号，跨版本的两个 run 因此会被标注为不可直接比较。
+
+可选值不用读源码就能发现：`known_vocabularies()` 列出全部预设，`GET /v1/meta` 的 `evidence.vocabularies` 公布同样的列表、默认值和各自的修订号。命令行用 `--vocabulary`（或 `AEVAL_TRACE_VOCABULARY`）选一套，run 的开头会回显选中词汇与修订号；写错的预设名在装配期就退出码 2 报错并列出可选值，不会静默退回默认表跑出一整轮「看似正常、实则全是证据缺失」的观测。
+
+`openinference-0.1.30` 是**抄自哪一版常量表**的标签：预设只是一张纯数据表，`openinference-semantic-conventions` 不是运行时依赖，没装也能选。
+
+预设管公共约定，宿主的私有属性名一律作为运行时条目注入（`extra_entries`），框架源码里不出现任何宿主名字：
 
 ```python
 from agent_eval.trace.mapping import default_mapping
 
-mapping = default_mapping({
-    # 标准字段 → 你埋点里实际写的属性名（可给多个，按顺序取首个命中）
-    "tool.name":   "myco.tool.name",
-    "usage.input_tokens": ["myco.llm.prompt_tokens", "gen_ai.usage.input_tokens"],
-    "artifact.type": "myco.artifact.kind",   # 规范未定义产物属性, 只能这样接入
-    "artifact.content": "myco.artifact.body",
-})
+mapping = default_mapping(
+    {
+        # 标准字段 → 你埋点里实际写的属性名（可给多个，按顺序取首个命中）
+        "tool.name":   "myco.tool.name",
+        "usage.input_tokens": ["myco.llm.prompt_tokens", "gen_ai.usage.input_tokens"],
+        "artifact.type": "myco.artifact.kind",   # 规范未定义产物属性, 只能这样接入
+        "artifact.content": "myco.artifact.body",
+    },
+    vocabulary="openinference",  # 先选对公共约定, 这里只补你自己的私有名
+)
 runner = EvalRunner(..., trace_mapping=mapping)
 ```
 
-规范本身没定义属性名的字段（`tool.success`、`usage.total_tokens`、`span.role`、产物三件套）默认**没有条目**：不声明就读不到，读不到就报缺失，框架不会拿相近的名字凑数。
+两处的分工由此固定：**能用公共约定表达的字段不要写进 `extra_entries`**，预设里已经有了；反过来，宿主私有的词只能进这张运行时表，加一个宿主 = 加几条表项，不改框架源码也不改评分器。一个真实参照：接入 Phoenix 埋点的宿主原本手写 9 条条目才读出 token、模型名、会话与角色，预设落地后删到只剩 3 条公共约定确实没覆盖的宿主专有名。
+
+默认表（`otel-genai` 预设）里没条目的字段是规范本身没定义属性名的一类：`tool.success`、`usage.total_tokens`、`span.role` 与产物三件套（`artifact.*`）。不声明就读不到，读不到就报缺失，框架不会拿相近的名字凑数。`tool.parameters` 也刻意不映进 `tool.arguments`：无法确认它装的是调用实参还是参数 schema，猜错的代价不是「读不到」，而是把一个错误的东西当成证据去判定。
 
 ### span 角色怎么定
 

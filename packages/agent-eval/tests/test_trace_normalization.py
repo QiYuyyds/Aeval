@@ -356,3 +356,72 @@ def test_reconstructed_attributes_reach_the_normalization_layer():
     assert both.tool_call_count == 1
     assert both.llm_call_count == 1
     assert not is_missing(both.llm_calls[0].input_tokens)
+
+
+# ── 词汇预设 (add-openinference-mapping-preset) ─────────────────────────────
+
+
+def test_openinference_preset_needs_no_host_entries():
+    """只选预设、零 extra_entries, 就能读 Phoenix 实际导出的名字。"""
+    mapping = default_mapping(vocabulary="openinference")
+    observations = normalize_spans(
+        [{
+            "name": "ChatCompletion",
+            "attributes": {
+                "openinference.span.kind": "LLM",
+                "llm.model_name": "some-model",
+                "llm.token_count.prompt": 900,
+                "llm.token_count.completion": 40,
+                "llm.token_count.prompt_details.cache_read": 800,
+                "llm.token_count.completion_details.reasoning": 12,
+                "llm.token_count.total": 940,
+                "session.id": "sess_1",
+            },
+            "start_time": "2026-09-05T10:00:00Z",
+            "end_time": "2026-09-05T10:00:02Z",
+        }],
+        mapping=mapping,
+    )
+
+    assert observations.llm_call_count == 1
+    call = observations.llm_calls[0]
+    assert (call.input_tokens, call.output_tokens) == (900, 40)
+    assert (call.cache_read_tokens, call.reasoning_tokens) == (800, 12)
+    assert call.model == "some-model"
+    assert observations.session_id == "sess_1"
+
+
+def test_openinference_preset_keeps_genai_names_as_fallback():
+    """迁移期两种埋点共存: 新约定优先, 默认条目仍是候选。"""
+    mapping = default_mapping(vocabulary="openinference")
+
+    assert mapping.candidates("usage.input_tokens") == (
+        "llm.token_count.prompt",
+        "gen_ai.usage.input_tokens",
+    )
+    assert mapping.spec_version == "openinference-0.1.30"
+
+
+def test_default_vocabulary_is_unchanged():
+    """不指定词汇时语义必须与本变更前逐字一致。"""
+    mapping = default_mapping()
+
+    assert mapping.candidates("usage.input_tokens") == ("gen_ai.usage.input_tokens",)
+    assert mapping.candidates("usage.total_tokens") == ()  # 规范未定义, 仍无条目
+    assert mapping.spec_version != "openinference-0.1.30"
+
+
+def test_unknown_vocabulary_fails_loudly_at_assembly():
+    """拼错的预设必须报错并列出可选值 —— 静默退回默认表会产出全空观测。"""
+    with pytest.raises(ValueError, match="otel-genai"):
+        default_mapping(vocabulary="open-infrence")
+
+
+def test_every_published_vocabulary_assembles_with_its_spec_version():
+    """公布的可选值必须真能用: 清单与实际装配口径不能各说各话。"""
+    from agent_eval.trace.mapping import VOCABULARY_SPEC_VERSIONS, known_vocabularies
+
+    names = known_vocabularies()
+    assert names[0] == "otel-genai"  # 默认值在前, 调用方据此知道不填时是哪一版
+    for name in names:
+        assert default_mapping(vocabulary=name).spec_version == VOCABULARY_SPEC_VERSIONS[name]
