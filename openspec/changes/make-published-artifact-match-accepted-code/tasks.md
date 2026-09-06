@@ -42,10 +42,13 @@
 
 ## 4. 版本与迁移说明
 
-- [ ] 4.1 `packages/agent-eval/pyproject.toml`：`0.1.0 → 0.2.0`（不取 1.0.0 的理由见 design D1）
-- [ ] 4.2 写迁移说明（`docs/` 下新章节或 `CHANGELOG.md`，取仓库现有习惯）：③ 破坏的 `AgentRunner` 签名与宿主侧改法；`trace_mapping=` / `--vocabulary` 接入；① 收紧后**门禁可能拦下历史放行的构建**（明确不提供 legacy 旗标）；历史 run 不回算亦不可重评；`cost_usd` 无价目表时不可计算
-- [ ] 4.3 README 安装段：发布后 `pip install aeval-framework` 与从源码 `pip install -e ./packages/agent-eval` 并列，**不写死版本号**（design D4）
-- [ ] 4.4 确认宿主 `.venv` 在正式包发布后可从 `aeval-framework==0.2.0` 安装（当前依赖 editable）
+- [x] 4.1 `packages/agent-eval/pyproject.toml`：`0.1.0 → 0.2.0`（不取 1.0.0 的理由见 design D1）
+- [x] 4.2 写迁移说明（`docs/` 下新章节或 `CHANGELOG.md`，取仓库现有习惯）：③ 破坏的 `AgentRunner` 签名与宿主侧改法；`trace_mapping=` / `--vocabulary` 接入；① 收紧后**门禁可能拦下历史放行的构建**（明确不提供 legacy 旗标）；历史 run 不回算亦不可重评；`cost_usd` 无价目表时不可计算
+  - 仓库无 CHANGELOG，习惯是 docs/ 中文文档 → `docs/getting-started.md` 新增「升级到 0.2.0（从 0.1.x）」一节，五点全覆盖；顺带修正了该文档 §6 里仍教旧三元组签名的示例（教人写坏代码的迁移文档等于没有）。
+- [x] 4.3 README 安装段：发布后 `pip install aeval-framework` 与从源码 `pip install -e ./packages/agent-eval` 并列，**不写死版本号**（design D4）
+  - README.md 与 README.zh-CN.md 都已并列两条路径，均无版本号钉死。
+- [x] 4.4 确认宿主 `.venv` 在正式包发布后可从 `aeval-framework==0.2.0` 安装（当前依赖 editable）
+  - 已确认：宿主 venv 里 `aeval-framework 0.1.0` 是 editable 安装（Editable project location: `D:\java\project\Aeval-publish\packages\agent-eval`）；宿主 `requirements.txt` 注释早已写明 PyPI 发行路径 `pip install "aeval-framework[api,cli]"`，发布后切到 `==0.2.0` 无障碍。
 
 ## 5. 从制品验证（必须先于 tag）
 

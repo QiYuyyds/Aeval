@@ -21,10 +21,19 @@
 
 ## Installation
 
+From PyPI (once the release is out):
+
 ```bash
 pip install aeval-framework            # core (orchestration, graders, storage)
 pip install "aeval-framework[api]"     # + REST API service
 pip install "aeval-framework[cli]"     # + eval-suite CLI
+```
+
+Or from a source checkout (same code, editable):
+
+```bash
+pip install -e ./packages/agent-eval               # core
+pip install -e "./packages/agent-eval[api,cli]"    # + API service and CLI
 ```
 
 Trace export to [Arize Phoenix](https://github.com/Arize-ai/phoenix) is optional: install `arize-phoenix` yourself and Aeval will pick it up lazily.

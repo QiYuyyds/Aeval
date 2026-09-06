@@ -91,16 +91,48 @@ eval-suite validate examples/minimal/suite.yaml   # 合法 → 退出码 0
 
 ## 6. 接入你自己的 Agent
 
-内置 Mock Agent 只用于演示。接入真实 Agent 只需实现一个方法（`AgentRunner` 协议）：
+内置 Mock Agent 只用于演示。接入真实 Agent 只需实现一个方法（`AgentRunner` 协议，**0.2.0 起的签名**）：
 
 ```python
+from agent_eval.core.types import TrialEvidence
+
 class MyAgentRunner:
-    async def run(self, task) -> tuple[str, list[dict], dict]:
-        # 执行 task.prompt，收集 trace_id / transcript / outcome
-        return trace_id, transcript, outcome
+    async def run(self, view, session) -> TrialEvidence:
+        # view 只暴露 id/description/prompt/env —— 判据与答案键不会递给被评方
+        trace_id, transcript, outcome = await my_agent.run(view.prompt, view.env)
+        # 最小路径：一次交付全部证据
+        return TrialEvidence.runner_reported(
+            trace_id=trace_id, transcript=transcript, state=outcome,
+        )
 ```
 
+要渐进交付（边做边推读数、运行中让评测侧取证）就走 `session.emit(...)` 与
+`await session.harness_probe(...)`；参考实现见 `src/agent_eval/examples/mock_runner.py`。
 详细见 [接入指南](./integration-guide.md)；HTTP Agent 的适配模板见 `examples/achat/`。
+
+## 升级到 0.2.0（从 0.1.x）
+
+0.2.0 是**破坏性版本**，四件事需要动手，其余升级即用：
+
+1. **`AgentRunner` 签名断裂（不留兼容层）**。旧写法
+   `async def run(self, task) -> tuple[str, list[dict], dict]` 不再被接受，
+   新签名是 `run(view: TaskView, session: TrialSession) -> TrialEvidence`。
+   宿主侧最小改法：把三元组换成 `TrialEvidence.runner_reported(trace_id=…, transcript=…, state=…)`；
+   环境状态想被评测侧独立取证时，实现 `probe()` 并让适配层读 `session.harness_probe()` 的读数
+   （自报数据走 `subject` 级，判定取信见 [Grader 参考](./grader-reference.md)）。
+   会话句柄的三个能力（推送读数 / 当场取证 / 取消与时限）全部可选，只用返回值的接入方依旧最简。
+2. **trace 词汇选择**。trace 属性翻译表默认仍是 `otel-genai`；trace 由 Phoenix 或
+   OpenInference 系埋点导出时改用 OpenInference 预设：
+   库侧 `default_mapping(vocabulary="openinference", extra_entries=宿主专有条目)`，
+   CLI 侧 `eval-suite run --vocabulary openinference`（或环境变量 `AEVAL_TRACE_VOCABULARY`）。
+   未知名字在装配期报错并列出可选值；`/v1/meta` 公布全部预设与各自的规范修订号。
+3. **门禁可能拦下历史放行的构建**（统计口径收紧，见顶部「升级提示」）。三类信号
+   （`pass@1` 语义修正 / 退出码 3 / `insufficient_data`）都不是退化而是旧数在撒谎。
+   **没有提供 legacy 旗标**，也不会有——回退口径等于继续拿错的数做决策。
+4. **历史 run 不回算、也不可重评**。0.1.x 落盘的 run 仍完整可读，但它们没保留来源分级与
+   证据边界，API/CLI 会显示 `Regrade: no — <原因>`；对它们重新评分只会产出另一个错的数。
+5. **`cost_usd` 需要价目表**。框架不内置任何价格数据：没有配置价目表时成本报告为
+   「不可计算」（带原因），不会用猜测的单价折算。
 
 ## 下一步
 

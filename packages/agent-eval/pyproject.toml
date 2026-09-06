@@ -2,7 +2,7 @@
 # Distribution name: aeval-framework (PyPI). Python module: agent_eval, CLI: eval-suite.
 # (`agent-eval` on PyPI belongs to an unrelated project — UK AISI agenteval.)
 name = "aeval-framework"
-version = "0.1.0"
+version = "0.2.0"
 description = "Aeval — open-source agent evaluation framework driven by OTel traces (suites, graders, metrics, storage, API, CLI)"
 readme = "README.md"
 requires-python = ">=3.11"

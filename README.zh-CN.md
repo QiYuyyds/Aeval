@@ -20,10 +20,19 @@
 
 ## 安装
 
+发布后从 PyPI 安装：
+
 ```bash
 pip install aeval-framework            # 核心（编排 / 评分 / 存储）
 pip install "aeval-framework[api]"     # + REST API 服务
 pip install "aeval-framework[cli]"     # + eval-suite 命令行
+```
+
+或从源码检出安装（同一份代码，可编辑）：
+
+```bash
+pip install -e ./packages/agent-eval               # 核心
+pip install -e "./packages/agent-eval[api,cli]"    # + API 服务与命令行
 ```
 
 导出 trace 到 [Arize Phoenix](https://github.com/Arize-ai/phoenix) 是可选能力：自行安装 `arize-phoenix`，Aeval 会在使用时懒加载。
