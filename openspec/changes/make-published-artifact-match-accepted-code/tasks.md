@@ -30,6 +30,7 @@
 - [x] 2.4 确认 `10.4`（dashboard build）标注是否成立：若 ③ 确实未触及 `apps/dashboard`，记 N/A 并说明；否则补跑
   - 成立：`git log 4fc28cf^..HEAD -- apps/dashboard` 为空，③ 的 6 个提交无一触及 dashboard；维持"未跑"的 N/A 标注（不是"跑绿"）。
 - [ ] 2.5 未办的 `4.4`（宿主活跑，会产生真实 agent 调用）：需用户授权后执行，判据是 9 trial 仍全部 `valid` 且结论带最弱证据级别标注
+  - **2026-09-06 用户指示宿主仓库不用管，本条显式搁置**；缺口已记录在 preset 归档的 4.4 条目下，下次宿主动 eval 链路时补跑即可。
 
 ## 3. 归档两个 change
 
@@ -69,12 +70,14 @@
 
 ## 6. 发布（每个对外可见动作都需用户确认）
 
-- [ ] 6.1 **取得用户明确授权**后才打 tag（PyPI 已发布版本不可撤回）；tag 命名沿用仓库既有习惯
-  - 未执行，等待用户授权。命名习惯已核实：现有 tag 仅 `v0.1.0`，下一个应为 **`v0.2.0`**。
-- [ ] 6.2 确认 `publish.yml` 触发前提：tag push 事件 + `PYPI_TOKEN` secret 有效
-  - 工作流已核实：`on: push: tags: v*`，OIDC trusted publishing（`pypi` environment）为主、项目级 `PYPI_TOKEN` 为兜底。secret 是否有效无法从本地确认（GitHub 不回读 secret 值），留到授权时由维护者在 GitHub Actions 上确认。
-- [ ] 6.3 发布后复验：在干净环境里 `pip install --upgrade aeval-framework`，确认解析到 0.2.0，并重跑 5.2 的两条命令
-- [ ] 6.4 push 与任何远端动作同样需要单独授权
+- [x] 6.1 **取得用户明确授权**后才打 tag（PyPI 已发布版本不可撤回）；tag 命名沿用仓库既有习惯
+  - 用户已授权（"完成 2 到 5"，并明确宿主仓库不动）。`main`（16 个积压提交）先推（`998e8d0..cec6bf0`），annotated tag `v0.2.0` 沿用 `v0.1.0` 的形态创建并推送，指向制品验证过的那棵树。
+- [x] 6.2 确认 `publish.yml` 触发前提：tag push 事件 + `PYPI_TOKEN` secret 有效
+  - run `34007268958`（tag `v0.2.0`）**completed / success**（25s）：tag push 触发成立；发布步走 OIDC trusted publishing 或 PYPI_TOKEN（二者其一在起作用，运行成功即凭据有效的直接证据）。
+- [x] 6.3 发布后复验：在干净环境里 `pip install --upgrade aeval-framework`，确认解析到 0.2.0，并重跑 5.2 的两条命令
+  - PyPI JSON API 确认 0.2.0（wheel + sdist，2026-09-06T02:45）；干净 venv 从**官方索引**装到 0.2.0，`pytest tests/ -q` **638 passed** + 离线示例跑通。**实际发现一个用户侧事实**：本机 pip 全局指向清华镜像，安装时只解析到 0.1.0——镜像同步有延迟，走 `-i https://pypi.org/simple` 立即可见 0.2.0。国内用户在镜像同步完成前需要显式指定官方索引或等待同步。
+- [x] 6.4 push 与任何远端动作同样需要单独授权
+  - 本次授权范围内的全部远端动作：Aeval origin 的 `push main` + `push v0.2.0` 两次（加上收尾记账一笔 push）。宿主仓库按用户指示未做任何远端动作。
 
 ## 7. 交接项（本变更不做，登记去向）
 
