@@ -330,6 +330,15 @@ curl http://localhost:8000/api/eval/graders     # 或独立部署 /v1/graders
 
 门的判定走判据自己的取信声明（`evidence` / `allow_subject` / `judgment_moment`）—— 不新造第二套证据机制；subject 级自报证据不得触发门（门判据声明 `allow_subject` 直接被装配期拒绝）。报告的「门 (gate) 结果」一节汇总每个门的因子与生效次数。
 
+塌缩后的 **trial 总分**落盘在 `synthesized_score`（汇总 `avg_score` 即对它取均值，CLI 下钻与 `/runs/{id}/trials` 读它）。API 中既有的 `trials[].score` 仍是 grader 简均（为兼容保留语义不变），所以在门塌缩的 run 上两者本就应当不同——看总分读前者。
+
+两条只能靠真跑才暴露的写法，`eval-suite validate` 不会拦：
+
+- **`name` 是注册表键，不是标签**。判据 `name` 必须命中已注册的评分器名（`code_based` / `transcript` / `metric` / `state_check` …）；写了自造名 → 每个 trial 判 `invalid` / `unknown_grader`，门根本没评到。同理，同一内置评分器在一个 task 里只能出现一次（结论按 `name` 建键，第二条会覆盖第一条）——要多条确定性检查，就把它们写进同一个 `code_based` 的 `checks` 列表，或改用不同类型的评分器。
+- **门的检查通道要能判别**。`code_based` 的 `target: transcript` 转储的是**整段对话含任务 prompt**：若禁值本身出现在 prompt 里，`not_contains` 会无条件失败，把被评方没做错的行为判成泄漏（要对 agent 自己的消息取判，只能用 `regex` 加角色锚点）。而 `target: outcome` 读的是 subject_state 通道，缺省取信声明（harness+runner）不含 subject，门又不得开 `allow_subject` —— 结果是读到空文本而**假通过**。写门时先确认它读的那条通道在自己的 `evidence` 声明下真的有内容。
+
 ## 多评分者判据（0.3.0）
 
 判据配置 ≥2 个 `judges` 定义后，每个定义对同一批 trial 独立评分；结论的 `rater_scores` / `rater_ratings` 按 trial 对齐，run 汇总的 `agreement` 块报告 Cohen's κ（两评分者无缺失）或 Krippendorff's α（≥2 评分者或含缺失），并附一致/分歧计数。评分者不足或对齐样本过少 → 值为 `None` + 原因（insufficient_data 语义），不伪造数值。
+
+配 κ/α 时有两个实践前提：**对齐样本 ≥ 5**（`MIN_ALIGNED_RATINGS_FOR_AGREEMENT`；对齐样本 = 有 ≥2 个评分者都给出判定的 trial 数，所以 3 次 trial 的两评分者面板只会拿到 `insufficient_data`），以及**各评分者的阈值要跨过指标实际分数带**——阈值都落在分数带同一侧时评分者永远判定一致，κ 退化成 1.0，量不出分歧。

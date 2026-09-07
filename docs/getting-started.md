@@ -155,6 +155,10 @@ class MyAgentRunner:
 4. **门是显式 opt-in**。不声明 `gate` / `reward_basis` 的套件分数与 0.2.0 逐位
    一致；声明了门判据而 `reward_basis` 为 additive（默认）时，门声明只随结论
    落盘并标注「未启用」。语法见 [YAML 格式](./yaml-format.md)。
+5. **trial 总分落盘为 `synthesized_score`**。乘性门塌缩后的 trial 总分现在随结论
+   一起存，汇总的 `avg_score` 就是对它取均值，CLI 下钻与 `/runs/{id}/trials` 读它。
+   API 里既有的 `trials[].score` 语义不变（仍是 grader 简均，为兼容保留），两者会
+   在门塌缩时不同；该字段落盘前的历史 run 读回为 `None`，呈现层自动回退简均。
 
 ## 下一步
 
