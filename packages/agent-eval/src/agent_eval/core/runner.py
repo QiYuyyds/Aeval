@@ -130,6 +130,16 @@ _BUDGET_REASONS = frozenset(
 # 框架在 teardown 之前自己发起的那次取证通道: 保证「至少有一个结束态读数」
 _END_PROBE_CHANNEL = "end_state"
 
+# 由「判定」产生的 trial 级无效原因: 只有这些能被重评分修好, 因此重评前重置。
+# 采集相的原因 (超时/外部依赖/取消/预算) 不在列 —— 它们不该被重评抹掉。
+_GRADING_OWNED_INVALID_REASONS = frozenset(
+    {
+        InvalidReason.GRADER_ERROR,
+        InvalidReason.GRADER_TIMEOUT,
+        InvalidReason.UNKNOWN_GRADER,
+    }
+)
+
 # 呈现用的视图 (trial.transcript / trial.outcome) 不丢任何一级 —— 分级约束的是
 # 「谁能据此判通过」, 不是「报告里能看见什么」
 _ALL_LEVELS = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
@@ -566,6 +576,13 @@ class EvalRunner:
                 trial.evidence = collected[(task_id, trial.trial_index)]
                 trial.evidence_archived = True
                 trial.grader_results = []
+                if trial.invalid_reason in _GRADING_OWNED_INVALID_REASONS:
+                    # 上一轮「判定」留下的无效结论由本轮重算: 留着它, 一次已修好的
+                    # judge 故障会把该 trial 永久钉在 invalid 上 (classify_trial 以
+                    # trial 级标志优先于 grader 结果)。采集相的故障不在此列 ——
+                    # 那些 trial 根本没有 grader 结论, 上面已经 continue 掉了。
+                    trial.verdict = TrialVerdict.VALID
+                    trial.invalid_reason = None
                 trial = await self._grade_and_finalize(
                     trial, task, run_id=run_id, triggered_by="regrade"
                 )
@@ -1807,6 +1824,7 @@ class EvalRunner:
         κ/α 的来源。某评分者本 trial 无有效判定记 None (缺失), 不冒充一致。
         """
         results: list[GraderResult] = []
+        failures: dict[str, str] = {}
         for judge in config.judges:
             judge_config = config
             if judge.config:
@@ -1824,12 +1842,15 @@ class EvalRunner:
                     timeout=self.grader_timeout,
                 )
             except Exception as e:  # noqa: BLE001 — 单个评分者故障 = 该格缺失
+                # 空消息的异常也要留得下原因: 只有类型名好过什么都不说
+                failure = str(e).strip() or repr(e)
+                failures[judge.name] = failure
                 result = GraderResult(
                     grader_name=config.name,
                     grader_type=config.type,
                     score=0.0,
                     passed=False,
-                    explanation=f"评分者 '{judge.name}' 评分失败: {e}",
+                    explanation=f"评分者 '{judge.name}' 评分失败: {failure}",
                     verdict=TrialVerdict.INVALID,
                     invalid_reason=InvalidReason.GRADER_ERROR,
                 )
@@ -1844,15 +1865,19 @@ class EvalRunner:
             rater_ratings[judge.name] = (
                 ("pass" if r.passed else "fail") if valid else None
             )
+        details = {
+            **primary.details,
+            "rater_scores": rater_scores,
+            "rater_ratings": rater_ratings,
+            "rater_count": len(config.judges),
+        }
+        if failures:
+            # 缺失格必须自带原因: 失败的不是首个定义时, primary 是别人的结论, 不带这条
+            details["rater_errors"] = failures
         return primary.model_copy(update={
             "rater_scores": rater_scores,
             "rater_ratings": rater_ratings,
-            "details": {
-                **primary.details,
-                "rater_scores": rater_scores,
-                "rater_ratings": rater_ratings,
-                "rater_count": len(config.judges),
-            },
+            "details": details,
         })
 
     def _agreement_block(

@@ -540,6 +540,34 @@ class TestAgreementPureFunctions:
         assert report.aligned_samples == 5
 
 
+class RaisingRaterGrader:
+    """指定评分者那一格抛异常 —— 模拟真实 judge 侧故障 (可给空消息异常)"""
+
+    name = "panel"
+    implementation_version = "1"
+    evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER)
+
+    def __init__(self, failing_key: str, empty_message: bool = True):
+        self.failing_key = failing_key
+        self.empty_message = empty_message
+
+    async def grade(self, trial, spans, task, context=None):
+        key = (
+            context.grader_config.config.get("judge_key")
+            if context is not None and context.grader_config is not None
+            else None
+        )
+        if key == self.failing_key:
+            raise RuntimeError("" if self.empty_message else "上游 429")
+        return GraderResult(
+            grader_name="panel",
+            grader_type=GraderType.CODE,
+            score=0.9,
+            passed=True,
+            explanation="ok",
+        )
+
+
 class TestMultiRaterRunner:
     @staticmethod
     def panel_task(max_trials: int, script: dict) -> tuple[EvalRunner, EvalTask, ScriptedGrader]:
@@ -557,6 +585,27 @@ class TestMultiRaterRunner:
             )],
         )
         return runner, task, grader
+
+    async def test_rater_failure_reason_reaches_conclusion(self):
+        """评分者故障原因必须进结论: 非首个定义失败时 primary 不带它; 空消息异常留类型名"""
+        runner = make_runner(graders=[RaisingRaterGrader(failing_key="b")])
+        task = EvalTask(
+            id="t1", prompt="p", max_trials=1,
+            graders=[GraderConfig(
+                type=GraderType.CODE, name="panel",
+                judges=[
+                    JudgeDefinition(name="judge-a", config={"judge_key": "a"}),
+                    JudgeDefinition(name="judge-b", config={"judge_key": "b"}),
+                ],
+            )],
+        )
+        run = await runner.run_suite(EvalSuite(name="s", tasks=[task]))
+        result = run.trials["t1"][0].grader_results[0]
+        # 基准结论 = judge-a 且它通过 → 失败信息不会出现在 primary 的 explanation 里
+        assert result.passed is True
+        assert result.rater_ratings["judge-b"] is None
+        errors = result.details["rater_errors"]
+        assert "RuntimeError" in errors["judge-b"]
 
     async def test_two_raters_report_kappa(self):
         """判据配置两个独立 judge → 汇总报告 κ 与一致/分歧计数 (5.2/5.3)"""

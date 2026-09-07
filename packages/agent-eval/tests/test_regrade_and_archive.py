@@ -27,7 +27,9 @@ from agent_eval.core.types import (
     EvalSuite,
     EvalTask,
     GraderConfig,
+    GraderResult,
     GraderType,
+    InvalidReason,
     JudgmentMoment,
     ObservedBy,
     RunResult,
@@ -224,6 +226,68 @@ async def test_regrade_appends_and_moves_the_current_pointer(backend, tmp_path):
     assert attempts[0].trial.success is True
     assert regaded.trials["t1"][0].success is True
     assert attempts[2].trial.success is True
+
+
+async def test_regrade_repairs_a_trial_the_last_grading_pass_marked_invalid():
+    """已修好的评测侧故障不得把 trial 永久钉在 invalid 上 (重算以 grader 为准)"""
+
+    class RepairableGrader:
+        name = "repairable"
+        implementation_version = "1"
+        evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER)
+
+        def __init__(self):
+            self.broken = True
+
+        async def grade(self, trial, spans, task, context=None):
+            if self.broken:
+                return GraderResult(
+                    grader_name=self.name,
+                    grader_type=GraderType.CODE,
+                    score=0.0,
+                    passed=False,
+                    explanation="评分者 'lenient' 评分失败: RuntimeError('')",
+                    verdict=TrialVerdict.INVALID,
+                    invalid_reason=InvalidReason.GRADER_ERROR,
+                )
+            return GraderResult(
+                grader_name=self.name,
+                grader_type=GraderType.CODE,
+                score=0.9,
+                passed=True,
+                explanation="故障已修, 重判通过",
+            )
+
+    grader = RepairableGrader()
+    agent = MockAgentRunner(success_rate=1.0, latency_range=FAST, script={"t1": ["success"]})
+    runner = make_runner(
+        agent,
+        graders=[grader],
+        environment=ProbeEnv(),
+    )
+    task = EvalTask(
+        id="t1", prompt="p", max_trials=2,
+        graders=[GraderConfig(type=GraderType.CODE, name="repairable")],
+    )
+    run = await runner.run_suite(
+        EvalSuite(name="repair-suite", version="1.0.0", tasks=[task])
+    )
+    assert run.trials["t1"][0].verdict is TrialVerdict.INVALID
+    assert run.summary.invalid_trials == 2 and run.summary.valid_trials == 0
+
+    grader.broken = False
+    regaded = await runner.regrade_run(run.run_id)
+
+    trial = regaded.trials["t1"][0]
+    assert trial.grader_results[0].verdict is TrialVerdict.VALID
+    assert trial.verdict is TrialVerdict.VALID
+    assert trial.invalid_reason is None
+    assert regaded.summary.valid_trials == 2
+    assert regaded.summary.invalid_trials == 0
+    # 上一轮结论仍然并列保留在历史里, 修复不是覆盖
+    attempts = await runner.storage.list_grade_attempts(run.run_id)
+    assert [a.triggered_by for a in attempts] == ["run"] * 2 + ["regrade"] * 2
+    assert attempts[0].trial.verdict is TrialVerdict.INVALID
 
 
 # ── 5.3 / 5.4 重评分不回查被评系统, 证据不齐即拒绝 ───────────────────────────
