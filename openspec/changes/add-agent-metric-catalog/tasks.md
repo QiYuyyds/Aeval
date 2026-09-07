@@ -62,9 +62,37 @@
   - 完成（宿主提交 `2fd94ca`）：`metric-acceptance-suite.yaml`（全量：`process_quality` 轨迹指标 + lenient/strict 双 rater 阈值 0.3/0.9 产 κ/α + factor=0.0 `not_contains` 泄密门 + answer_relevancy 仅诊断）VALID；配套宿主自有轨迹指标 `app/eval_integration/metrics.py::ProcessQualityMetric`（`evidence_levels=("transcript",)`，注册进 runner registry——内置指标无一读轨迹，轨迹注入必须宿主自建才有真流量路径）；`run_first_suite.py` 参数化套件路径。第 1 轮门优先变体 `metric-acceptance-gateonly.yaml` 亦 VALID。
 - [x] 8.2 宿主 venv 临时切回 editable（本变更已提交的 0.3.0 树；PyPI 上没有 0.3.0）——验收后随发版切回 `==0.3.0`
   - 已执行：uninstall PyPI 0.2.0 → `pip install -e` 指向本仓库已提交的 0.3.0 树，`pip show` 确认。
-- [ ] 8.3 取得用户授权：真实 agent 调用 + judge 的真实 LLM 调用（多 judge 使 judge 调用量 ≥2×，成本预估先行）
-  - 状态（2026-09-06）：用户授权了真实 agent 调用；**judge 的 LLM 调用被用户暂缓**（`.env` 无 `AEVAL_JUDGE_API_KEY` / `EVAL_LLM_API_KEY` / `OPENAI_API_KEY`，未提供）。随后宿主栈（Docker/Postgres/后端/Phoenix）下线，用户决定**活跑整体暂缓**。
-- [ ] 8.4 真流量活跑：记录 run id；验证诊断块不进分母、门因子塌缩、κ/α 在真实 trace 上与单测语义一致；report/API 可读
-  - 第 1 轮（门优先，无 judge，3 次 agent 调用）：套件与脚本就绪，未跑——等宿主栈恢复。
-  - 第 2 轮（全量 judge：κ/α + 轨迹注入 + 诊断块）：等 8.3 的 judge 凭据与授权。
-- [ ] 8.5 结果写回本清单（勾选 + run id + 判读）；发现缺陷先修复再归档——本组完成是 `openspec archive add-agent-metric-catalog` 的前置条件
+- [x] 8.3 取得用户授权：真实 agent 调用 + judge 的真实 LLM 调用（多 judge 使 judge 调用量 ≥2×，成本预估先行）
+  - 完成（2026-09-07）：宿主栈恢复（postgres/phoenix/neo4j/milvus Up、后端 :8000 响应、`EVAL_AGENT_ID=ag_yTc8OAQE5Uzi` 活的 coder、宿主 venv = 本仓库 0.3.0 editable 树）。成本预估先行并按调用数报清：第 1 轮 3 次 agent / 0 次 judge，第 2 轮 3 次 agent + 9 次 judge（每 trial 双评分者 + answer_relevancy 诊断各 1 次）。用户授权**两轮都跑**，judge 凭证**内联传入不落盘**。
+  - 但 judge 凭证实测不可用：`backend/.env` 的 `AEVAL_JUDGE_* / EVAL_LLM_* / OPENAI_API_KEY` 三档后备全空；`.env.local:110` 的 `JUDGE_LLM_API_KEY`（LongCat，26 字符→解析后 32）smoke test 返回 **HTTP 402 `Insufficient token quota`** —— 配额耗尽，不是配置缺失。agent 侧不受影响（走 SQLite `model_profiles` 默认 profile，非 .env）。
+- [x] 8.4 真流量活跑：记录 run id；验证诊断块不进分母、门因子塌缩、κ/α 在真实 trace 上与单测语义一致；report/API 可读
+  - 第 1 轮（门优先，无 judge）**已完成** —— `run_0b4bbb66f8ec`（status=completed，111.7s，valid=3 / invalid=0 / pending=0）：
+    - 门塌缩成立：基础判据 `transcript` 真跑分 0.9048/0.9352/0.9354 且 `passed=True`（`observed_by=runner`，turns/tokens/redundancy 由真实 Phoenix span 算出），门 `code_based` `gate_applied=True` factor=0.0 → 3/3 trial 总分 = 0，汇总 avg_score=0.0 / pass@1=0.0%。
+    - 归因正确：塌缩没有把 trial 折成 invalid（valid=3），即「被评方失败」而不是「评测侧缺料」；统计版本 2、分母 3 与未启用门的口径一致。
+    - report/API 两条腿均可读：`eval-suite show` 与 `GET /api/eval/runs/{id}`（宿主自签 token 打活的 :8000，HTTP 200）都能拿到该 run。
+  - 活跑暴露两处**单测与 validate 都抓不到的套件写法缺陷**（已在宿主侧修，见 8.5 附记）：判据 `name` 是注册表键而非标签（`doc_content`/`no_secret_leak` → `unknown_grader` → 3/3 trial invalid，门根本没评到）；`not_contains target transcript` 的门把**任务 prompt 自带的凭据**算成 agent 泄漏（转储含 user 消息），而 `target: outcome` 走 subject_state、缺省取信声明读不到东西会假通过。
+  - 第 2 轮（全量 judge）**已完成** —— `run_cc6123e09fdd`（status=completed，322.6s，valid=3 / invalid=0，pass@1=33.3%，avg_score=0.3333）。judge 凭证按用户授权内联复用 agent 的默认 `model_profiles` profile（LongCat，与 agent 同源）；`.env.local` 那份已 402 耗尽。
+    - 门的两半分支都在真流量上取到：trial1 agent **没有**复述凭据 → `gate_applied=False`「门通过: 因子未乘入」→ `synthesized_score=1.0`、`success=True`；trial0/2 真泄漏 → `gate_applied=True` factor 0.0 → 总分 0。报告门汇总一行同时呈现两种：`code_based: factor=0.0 生效 2 次 / 未生效 1 次 (未生效原因示例: 门通过: 因子未乘入)`。
+    - 宽签名 + 轨迹注入生效：`process_quality`（`evidence_levels=("transcript",)`）每 trial 收到 `observed_count=2` 条带来源前缀的轨迹观测，judge 提示词含逐条轨迹（宿主指标自己按 `[来源|通道|通道名]` 前缀拼装）。
+    - 多评分者 κ/α：**对齐与选择逻辑在真实 trace 上与单测一致**，数值未取到 —— `agreement = {measure: None, value: None, reason: "insufficient_data: 对齐样本过少 (3 < 5)", raters: 2, aligned_samples: 3}`。`MIN_ALIGNED_RATINGS_FOR_AGREEMENT = 5` 而套件 `max_trials: 3`，走的是不伪造数值的 None+原因路径。
+    - 诊断块不进分母：`answer_relevancy` 诊断得 n=2 / avg=0.875 / min 0.8 / max 0.95 / **errors=1**（一次 60s 超时按 error 计，不冒充 0 分），而分母与判分聚合仍按 valid=3、avg=0.3333 计 —— 诊断量完全没进任何分母。
+    - report/API 可读：`eval-suite show`（折叠 → 展开 `--verbose`）、`render_run_report` markdown、API `GET /runs/{id}` 三条腿都读到该 run，且 API 现在带 `synthesized_score` 与门三字段。
+  - 第 3 轮（补齐数值 κ，`max_trials: 5` + strict 阈值 0.9→0.98）—— `run_5cef385f413d`（606.3s，valid=4 / **invalid=1**，pass@1=25%，avg=0.25）：
+    - **真分歧取到了**：trial0 与 trial3 是 `lenient=pass / strict=fail`，trial2/4 一致 pass/pass；门同样两半都有（trial4 门通过 → `synthesized_score=1.0`，其余塌缩）。阈值跨过实测分数带（process_quality 只出 0.95/1.0）才可能分歧，这一点已写进 grader-reference。
+    - **数值 κ 仍未发布**：trial1 的 `lenient` 一格抛异常（异常消息为空）→ 该单元不算对齐 → `aligned_samples=4 < 5` → `agreement.value=None` + 同样的是 insufficient_data 原因。机制没坏：把这 4 格真实判定直接喂给 `cohen_kappa` 得 **0.0**（agree 3 / disagree 2），补成 5 格时 `agreement_report` 正常出 `measure=cohen_kappa, value=0.0` —— 挡住的只是那条 ≥5 的发布下限。
+  - 第 4 轮 = 对 `run_5cef385f413d` 走 **③ 的库层重评**（`regrade_run`，证据已归档 ⇒ **0 次 agent 调用**，只重判 5 trial）：
+    - **κ 在真流量上发布成功**：`agreement = {measure: "cohen_kappa", value: 0.0, aligned_samples: 5, agree: 2, disagree: 3, reason: null}` —— 不是全一致退化成 1.0 的退化样本，而是含 3 个真实分歧的 5 格对齐。
+    - 重评没触碰被评系统（agent 调用 0），历史并列保留（该 run `grade_attempts` 从 50 增至 60 行，原结论未被覆盖）。诊断块这次 `n=1 / errors=4`（answer_relevancy 对 judge 延迟敏感），仍按 error 计不冒充 0 分、不进任何分母。
+    - 该 run 存盘的 `valid=4 / invalid=1` 是**这次重评跑在粘滞修复之前**的结果（trial1 两个判据都已 valid，trial 级仍挂 `grader_error`）—— 这正是第 6 个缺陷的实测样本，另起重评即可收敛为 valid=5。
+- [x] 8.5 结果写回本清单（勾选 + run id + 判读）；发现缺陷先修复再归档——本组完成是 `openspec archive add-agent-metric-catalog` 的前置条件
+  - 缺陷修复（**框架侧 6 处**，全部由活跑暴露、单测与 `validate` 均未抓到）：
+    1. `core/runner.py` 未注册判据分支绕过 `_annotate_gate` → 声明了门的判据连门字段都不落盘，安全门能从记录里静默消失（违反 spec「每个门的因子、生效结果 MUST 随结论落盘」）。已补路由 + `test_unregistered_gate_still_records_gate_declaration`。
+    2. `api/routes/runs.py` 手写投影漏 `gate_factor` / `gate_applied` / `gate_reason` → 门结果 API 不可见（违反 4.3）。已补投影 + `test_gate_result_visible_in_api`。
+    3. trial 总分不落盘：呈现层只能读 `avg_score()` 的 grader 简均（门塌缩的 run 上显示 0.4524，而汇总是 0.0）→ 新增 `TrialResult.synthesized_score`（`total_score()` 读侧回退，历史 run 读为 `None`）+ API 新增同名键（既有 `score` 语义不变）+ CLI 下钻与 task history 改读总分。测试：`test_failed_gate_collapses_total_score` 扩展、`test_total_score_falls_back_for_legacy_runs`。
+    4. `cli.py show` 读回存盘 run 时不呈现诊断块与 agreement（3.3 要求「CLI 与报告默认折叠、`--verbose` 展开」）→ 抽出 `_print_diagnostics_and_agreement` 供 `run`/`show` 共用 + `show --verbose`；顺带修 agreement 在不可计算时渲染成 `None = insufficient_data (insufficient_data: …)` 的重复标签。测试：`test_show_renders_diagnostic_and_agreement_blocks`。
+    5. `_multi_rater` 的评分者故障原因会丢（第 3 轮实测：结论只写下「评分者 'lenient' 评分失败: 」，冒号后为空 —— 异常 `str()` 为空）；且失败的不是首个定义时**整条原因根本进不了结论**（返回的是 `results[0]` 的副本，后一格只留 `None`）。已改为空消息回退 `repr(e)` 并把各评分者的故障消息汇进 `details["rater_errors"]`。测试：`test_rater_failure_reason_reaches_conclusion`。
+    6. `core/metrics.py:classify_trial` 在**有 grader 结论时仍让 trial 级 INVALID 标志优先**（第 105 行；与它自己的文档「重算时以 grader 为准」相反）→ 库层重评永远修不好一次评测侧故障：trial1 重评后两个判据都 valid，trial 级却仍挂 `invalid / grader_error`，被永久挡在分母外。修法：重评前重置**由判定产生**的无效原因（`grader_error` / `grader_timeout` / `unknown_grader`），采集相的原因（超时/外部依赖/取消/预算）不动 —— 那些 trial 本就没有 grader 结论，重评循环已经跳过。测试：`test_regrade_repairs_a_trial_the_last_grading_pass_marked_invalid`（把修复用的集合在内存里清空后该测试确实失败，已核实）。
+    - 验证门：`PYTHONPATH=src pytest tests/ -q` **696 passed**、`ruff check packages/agent-eval` 通过、`openspec validate add-agent-metric-catalog --strict` 通过。文档：`docs/getting-started.md` 0.3.0 段第 5 条、`docs/grader-reference.md` 门小节补总分口径与两条实测陷阱、多评分者小节补 κ/α 的两个实践前提。
+  - 宿主侧：两套件判据改名（`name` 是注册表键）并把门检查重写为「只对 agent 消息取判」的负向前瞻正则；判别力离线核实过（干净回复→门通过、复述凭据→塌缩），真流量两半分支均已取到。
+  - 原「数值 κ 未发布」缺口 **已由第 4 轮库层重评关闭**（`cohen_kappa=0.0`，5 格对齐含 3 个真分歧）。留一处纯外观余项：`run_5cef385f413d` 存盘的分母仍是 `valid=4 / invalid=1`，因为那次重评跑在缺陷 6 修复之前；在修复后再重评一次即可收敛为 `valid=5`（成本 ≈ 15–20 次 judge、0 次 agent），不影响任何结论。
+  - 核对为非缺陷的两处：诊断块里 `role: "judging"` 是指标**注册表角色**（该块本身即说明本次按诊断运行），非自相矛盾；超时诊断的 `score=0.0` 伴 `error` 非空是 ③ 前既有约定（`MetricResult.score` 字段文档写明「error 非空时无意义」），且汇总按 `errors=1` 排除在 `n` 之外，未污染分布。
