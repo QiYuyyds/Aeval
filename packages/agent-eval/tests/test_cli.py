@@ -61,6 +61,28 @@ tasks:
               target: transcript
 """
 
+# 判据用 faithfulness、诊断用 answer_relevancy: 被判据引用的指标视为已升格,
+# 不会再作为诊断重复运行, 所以两个指标必须不同才同时覆盖两块呈现面
+SUITE_DIAGNOSTIC_AND_RATERS = """
+name: cli-diag
+version: 1.0.0
+description: diagnostic metric plus two-rater judge panel
+tasks:
+  - id: t_diag
+    prompt: hello
+    max_trials: 2
+    diagnostic_metrics:
+      - answer_relevancy
+    graders:
+      - type: metric
+        name: metric
+        config:
+          metric_name: faithfulness
+        judges:
+          - { name: lenient, config: { threshold: 0.2 } }
+          - { name: strict, config: { threshold: 0.9 } }
+"""
+
 SUITE_NO_CRITERIA = """
 name: cli-no-criteria
 version: 1.0.0
@@ -281,6 +303,28 @@ class TestListAndShow:
         assert "cli-pass" in result.output
         assert "t_ok" in result.output
         assert "PASS" in result.output
+
+    def test_show_renders_diagnostic_and_agreement_blocks(self, tmp_path):
+        """show 读回存盘 run 也要呈现诊断块 (默认折叠) 与 agreement 分块"""
+        db = tmp_path / "aeval.db"
+        run_result = runner.invoke(
+            app, ["run", _suite(tmp_path, SUITE_DIAGNOSTIC_AND_RATERS), "--db", str(db)]
+        )
+        run_id = _run_id(run_result)
+
+        folded = runner.invoke(app, ["show", run_id, "--db", str(db)])
+        assert folded.exit_code == 0, folded.output
+        assert "Diagnostics: 1 metric(s)" in folded.output
+        assert "not in any denominator" in folded.output
+        assert "Inter-rater agreement" in folded.output
+        # 信度与自一致不混排: agreement 行必须自证它不是 confidence
+        assert "self-consistency" in folded.output
+        assert "metric: None =" not in folded.output
+
+        expanded = runner.invoke(app, ["show", run_id, "--db", str(db), "--verbose"])
+        assert expanded.exit_code == 0, expanded.output
+        assert "Diagnostics (not in any denominator)" in expanded.output
+        assert "answer_relevancy" in expanded.output
 
     def test_show_task_drilldown(self, tmp_path):
         db = tmp_path / "aeval.db"

@@ -204,6 +204,48 @@ def _trace_provider_for(agent_runner):
     return MockTraceProvider()
 
 
+def _print_diagnostics_and_agreement(summary, verbose: bool) -> None:
+    """诊断块与跨评分者一致性的分块呈现 (run 与 show 共用, 不与判分量混排)。
+
+    诊断量不进分母, 默认折叠为一行, --verbose 展开。
+    """
+    diagnostics = getattr(summary, "diagnostic_metrics", None) or []
+    if diagnostics:
+        if verbose:
+            typer.echo("")
+            typer.echo("  Diagnostics (not in any denominator):")
+            for d in diagnostics:
+                typer.echo(
+                    f"    - {d.name}: n={d.n} avg={_num(d.avg)} min={_num(d.min)} "
+                    f"max={_num(d.max)} p50={_num(d.p50)}"
+                    + (f" errors={d.errors}" if d.errors else "")
+                )
+        else:
+            typer.echo(
+                f"  Diagnostics: {len(diagnostics)} metric(s) "
+                "(not in any denominator; use --verbose to expand)"
+            )
+    agreement = getattr(summary, "agreement", None) or {}
+    if agreement:
+        typer.echo("")
+        typer.echo(
+            "  Inter-rater agreement (single-rater multi-sample confidence is "
+            "self-consistency, not inter-rater reliability):"
+        )
+        for name, report in agreement.items():
+            if report.value is None:
+                typer.echo(f"    - {name}: 不可计算 — {report.reason or 'n/a'}")
+                continue
+            pair = (
+                f"  agree/disagree: {report.agree}/{report.disagree}"
+                if report.agree is not None
+                else ""
+            )
+            typer.echo(
+                f"    - {name}: {report.measure} = {report.value:.4f}{pair}"
+            )
+
+
 def _print_run_summary(run, verbose: bool = False) -> None:
     """§11.2 形态的汇总输出 (无 emoji, 兼容非 UTF-8 终端)。
 
@@ -241,41 +283,7 @@ def _print_run_summary(run, verbose: bool = False) -> None:
     typer.echo(f"  Tasks: {summary.total_tasks}  Trials: {summary.total_trials}")
 
     # 诊断块 (折叠/展开) 与跨评分者一致性分块呈现, 不与判分量混排
-    diagnostics = getattr(summary, "diagnostic_metrics", None) or []
-    if diagnostics:
-        if verbose:
-            typer.echo("")
-            typer.echo("  Diagnostics (not in any denominator):")
-            for d in diagnostics:
-                typer.echo(
-                    f"    - {d.name}: n={d.n} avg={_num(d.avg)} min={_num(d.min)} "
-                    f"max={_num(d.max)} p50={_num(d.p50)}"
-                    + (f" errors={d.errors}" if d.errors else "")
-                )
-        else:
-            typer.echo(
-                f"  Diagnostics: {len(diagnostics)} metric(s) "
-                "(not in any denominator; use --verbose to expand)"
-            )
-    agreement = getattr(summary, "agreement", None) or {}
-    if agreement:
-        typer.echo("")
-        typer.echo(
-            "  Inter-rater agreement (single-rater multi-sample confidence is "
-            "self-consistency, not inter-rater reliability):"
-        )
-        for name, report in agreement.items():
-            value = (
-                f"{report.value:.4f}"
-                if report.value is not None
-                else f"{INSUFFICIENT_LABEL} ({report.reason or 'n/a'})"
-            )
-            pair = (
-                f"  agree/disagree: {report.agree}/{report.disagree}"
-                if report.agree is not None
-                else ""
-            )
-            typer.echo(f"    - {name}: {report.measure} = {value}{pair}")
+    _print_diagnostics_and_agreement(summary, verbose)
 
     if summary.failures:
         typer.echo("")
@@ -559,6 +567,11 @@ def show(
     db: str | None = typer.Option(
         None, "--db", envvar="AEVAL_DB", help="SQLite 结果库路径 (默认 ./aeval.db)"
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="展开诊断块 (默认折叠为一行)",
+    ),
 ) -> None:
     """输出 run 详情; --task 下钻单任务。"""
     storage = _build_storage(db)
@@ -598,6 +611,8 @@ def show(
         )
     else:
         typer.echo(f"  Avg Score: {INSUFFICIENT_LABEL}")
+
+    _print_diagnostics_and_agreement(summary, verbose)
 
     typer.echo("")
     typer.echo(
@@ -642,7 +657,7 @@ def show(
                     if t.weakest_evidence is not None
                     else "[evidence unknown]"
                 )
-                + f"(score {t.avg_score():.4f}, {t.duration_ms:.0f}ms"
+                + f"(score {t.total_score():.4f}, {t.duration_ms:.0f}ms"
                 + (f", error: {t.error}" if t.error else "") + ")"
             )
             for gr in t.grader_results:
@@ -662,9 +677,17 @@ def show(
                         else ""
                     )
                     + weak
+                    + (
+                        f" [gate factor={gr.gate_factor:g} "
+                        f"{'已塌缩' if gr.gate_applied else '未乘入'}]"
+                        if gr.gate_factor is not None
+                        else ""
+                    )
                 )
                 if gr.explanation:
                     typer.echo(f"      {gr.explanation}")
+                if gr.gate_reason:
+                    typer.echo(f"      gate: {gr.gate_reason}")
 
 
 async def _get_run(storage, run_id: str):

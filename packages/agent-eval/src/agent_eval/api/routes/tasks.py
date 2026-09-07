@@ -109,8 +109,9 @@ async def get_task_history(task_id: str):
             "valid_trials": len(valid),
             "invalid_trials": len(buckets[TrialVerdict.INVALID]),
             "pending_trials": len(buckets[TrialVerdict.PENDING]),
+            # 与 run summary 的 avg_score 同一口径: trial 总分 (含门塌缩), 非 grader 简均
             "avg_score": (
-                round(sum(t.avg_score() for t in valid) / len(valid), 4)
+                round(sum(t.total_score() for t in valid) / len(valid), 4)
                 if valid else None
             ),
             "graders": {

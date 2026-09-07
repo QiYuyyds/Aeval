@@ -1303,15 +1303,20 @@ class EvalRunner:
             grader = self._resolve_grader(config)
 
             if grader is None:
-                # 未注册 grader = 评测配置故障, 不是 agent 表现
-                grader_results[config.name] = GraderResult(
-                    grader_name=config.name,
-                    grader_type=config.type,
-                    score=0.0,
-                    passed=False,
-                    explanation=f"Unknown grader: {config.name}",
-                    verdict=TrialVerdict.INVALID,
-                    invalid_reason=InvalidReason.UNKNOWN_GRADER,
+                # 未注册 grader = 评测配置故障, 不是 agent 表现。门声明仍要落盘:
+                # 一个没评上的安全门必须看得见, 不能和「压根不是门的判据」混同。
+                grader_results[config.name] = self._annotate_gate(
+                    GraderResult(
+                        grader_name=config.name,
+                        grader_type=config.type,
+                        score=0.0,
+                        passed=False,
+                        explanation=f"Unknown grader: {config.name}",
+                        verdict=TrialVerdict.INVALID,
+                        invalid_reason=InvalidReason.UNKNOWN_GRADER,
+                    ),
+                    config,
+                    basis,
                 )
                 continue
 
@@ -1411,6 +1416,8 @@ class EvalRunner:
 
         # 根据评分策略计算最终成功状态
         trial.success = self._compute_trial_success(task, trial.grader_results)
+        # 合成分随 trial 落盘: 汇总读的就是这一条序列, 门的塌缩必须在这层也看得见
+        trial.synthesized_score = self._trial_weighted_score(task, trial)
         # trial 结论分类 (invalid/pending 不占通过率分母); 不改写 success 语义
         trial.verdict = classify_trial(trial)
         trial.invalid_reason = trial_invalid_reason(trial)

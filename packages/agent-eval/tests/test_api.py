@@ -215,6 +215,50 @@ class TestRunLifecycle:
         assert gr["invalid_reason"] == "unknown_grader"
         assert "Unknown grader" in gr["explanation"]
 
+    async def test_gate_result_visible_in_api(self, client):
+        """Scenario: 门结果随结论落盘且 API 可见 (spec: graders 乘性安全门)"""
+        suite = {
+            "name": "gate-suite",
+            "tasks": [
+                {
+                    "id": "t_gate",
+                    "prompt": "hello",
+                    "max_trials": 1,
+                    "reward_basis": "multiplicative",
+                    "graders": [
+                        {"type": "transcript", "name": "transcript"},
+                        {
+                            "type": "code",
+                            "name": "code_based",
+                            "gate": {"factor": 0.0},
+                            "config": {
+                                "checks": [
+                                    {"type": "contains", "value": "ZX-绝不在 mock 输出里的串"}
+                                ]
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        await client.post("/suites", json=suite)
+        run_id = (await client.post("/runs", json={"suite_name": "gate-suite"})).json()["run_id"]
+        run = await _poll_run(client, run_id)
+
+        gate = next(
+            g for g in run["trials"]["t_gate"][0]["grader_results"]
+            if g["grader_name"] == "code_based"
+        )
+        assert gate["gate_factor"] == 0.0
+        assert gate["gate_applied"] is True
+        assert "门失败" in gate["gate_reason"]
+        # 塌缩后的总分进汇总: 非门判据再高也乘为 0
+        assert run["summary"]["avg_score"] == 0.0
+        # trial 级总分随结论落盘并暴露; 既有 score 字段语义不变 (grader 简均)
+        trial0 = run["trials"]["t_gate"][0]
+        assert trial0["synthesized_score"] == 0.0
+        assert trial0["score"] > 0.0
+
     async def test_unknown_suite_404(self, client):
         resp = await client.post("/runs", json={"suite_name": "nope"})
         assert resp.status_code == 404

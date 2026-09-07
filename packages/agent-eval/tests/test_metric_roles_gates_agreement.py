@@ -281,6 +281,48 @@ class TestRewardBasisGates:
         assert trial.success is False
         # 汇总读到的加权分也是塌缩后的
         assert run.summary.task_summaries[0].avg_score == 0.0
+        # trial 级落盘的合成分 = 塌缩后的总分, 不是 grader 简均
+        assert trial.synthesized_score == 0.0
+        assert trial.avg_score() == pytest.approx(0.5)
+        assert trial.total_score() == 0.0
+
+    def test_total_score_falls_back_for_legacy_runs(self):
+        """历史 run 未落盘合成分 → total_score() 回退 grader 简均, 不报错"""
+        trial = TrialResult(
+            trial_index=0,
+            success=True,
+            grader_results=[
+                GraderResult(
+                    grader_name="a", grader_type=GraderType.CODE, score=0.8, passed=True
+                ),
+                GraderResult(
+                    grader_name="b", grader_type=GraderType.CODE, score=0.6, passed=True
+                ),
+            ],
+        )
+        assert trial.synthesized_score is None
+        assert trial.total_score() == pytest.approx(0.7)
+
+    async def test_unregistered_gate_still_records_gate_declaration(self):
+        """门判据未注册 → 门声明仍随结论落盘并标注未生效: 安全门不得静默消失"""
+        runner = make_runner(graders=[ScriptedGrader("base", {"base": ["pass"]})])
+        run = await runner.run_suite(
+            EvalSuite(
+                name="s",
+                tasks=[gate_task(basis="multiplicative", gate_factor=0.0)],
+            )
+        )
+        trial = run.trials["t1"][0]
+        safety = next(g for g in trial.grader_results if g.grader_name == "safety")
+        assert safety.verdict is TrialVerdict.INVALID
+        assert safety.invalid_reason is InvalidReason.UNKNOWN_GRADER
+        assert safety.gate_factor == 0.0
+        assert safety.gate_applied is False
+        assert "门未生效" in (safety.gate_reason or "")
+        assert "unknown_grader" in (safety.gate_reason or "")
+        # 评测侧配置故障 = 无效 trial, 不是被评方失败: 不进分母
+        assert run.summary.valid_trials == 0
+        assert run.summary.invalid_trials == 1
 
     async def test_soft_gate_partial_collapse(self):
         """软门 (factor 0.5): 基础 0.9 × 0.5 = 0.45"""

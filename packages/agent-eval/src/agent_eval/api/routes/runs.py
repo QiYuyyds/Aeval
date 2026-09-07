@@ -185,6 +185,8 @@ async def get_run(run_id: str):
                     "trace_id": t.trace_id,
                     "success": t.success,
                     "score": t.avg_score(),
+                    # trial 总分 (权重/策略/乘性门塌缩后的值; None = 该字段落盘前的历史 run)
+                    "synthesized_score": t.synthesized_score,
                     "duration_ms": t.duration_ms,
                     "error": t.error,
                     "verdict": t.verdict.value,
@@ -217,6 +219,10 @@ async def get_run(run_id: str):
                                 gr.judgment_moment.value if gr.judgment_moment else None
                             ),
                             "subject_only": gr.subject_only,
+                            # 门结果: 因子 / 是否乘入总分 / 未生效原因 (spec: graders)
+                            "gate_factor": gr.gate_factor,
+                            "gate_applied": gr.gate_applied,
+                            "gate_reason": gr.gate_reason,
                         }
                         for gr in t.grader_results
                     ],
@@ -477,6 +483,7 @@ async def submit_human_score(run_id: str, request: HumanScoreRequest):
     # 重算 trial 成功状态与 run 汇总 (含该 task 汇总)
     if task is not None:
         trial.success = runner._compute_trial_success(task, trial.grader_results)
+        trial.synthesized_score = runner._trial_weighted_score(task, trial)
     trial.verdict = classify_trial(trial)
     trial.invalid_reason = trial_invalid_reason(trial)
     if run.statistics_version is None:

@@ -1349,6 +1349,14 @@ class TrialResult(BaseModel):
         description="本 trial 的诊断指标结果 (不进判分与分母); 空 = 未启用诊断指标"
         "或历史 run (读回为空, 不报错)",
     )
+    synthesized_score: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="本 trial 的合成分 —— 汇总 avg_score 就是对它取均值, 且乘性门的"
+        "塌缩在这里生效 (与 success 判定同源)。None = 未落盘该字段的历史 run;"
+        "读它, 别用 avg_score() 的 grader 简均去推断总分",
+    )
 
     # ── 证据与取信 (spec: extension-contracts / orchestration) ──
     evidence: TrialEvidence | None = Field(
@@ -1376,10 +1384,20 @@ class TrialResult(BaseModel):
         return self.evidence_archived
 
     def avg_score(self) -> float:
-        """计算所有 grader 的平均分"""
+        """grader 分数的简单平均 —— **不是** trial 总分: 权重、评分策略与乘性门
+        塌缩都不在其中。总分读 TrialResult.synthesized_score。"""
         if not self.grader_results:
             return 0.0
         return sum(r.score for r in self.grader_results) / len(self.grader_results)
+
+    def total_score(self) -> float:
+        """trial 总分的读侧口径: 落盘的合成分优先, 回退 grader 简均
+        (该字段落盘前的历史 run 没有合成分可读)。"""
+        return (
+            self.synthesized_score
+            if self.synthesized_score is not None
+            else self.avg_score()
+        )
 
 
 class GradeAttempt(BaseModel):
