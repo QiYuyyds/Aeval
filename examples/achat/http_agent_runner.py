@@ -38,7 +38,6 @@ import os
 from typing import Any
 
 import httpx
-
 from agent_eval.core.contract import TransientError, TrialSession
 from agent_eval.core.types import TaskView, TrialEvidence
 

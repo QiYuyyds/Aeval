@@ -69,13 +69,13 @@ _以下两条为 2026-09-10 复审新增（spec: extension-contracts「模拟器
 
 ## 8. 验证门（离线）
 
-- [x] 8.1 `ruff check packages/agent-eval` 通过
+- [x] 8.1 `ruff check packages/agent-eval` 通过；lint 范围经 8.7 扩到 `examples/`（`ruff check examples --config packages/agent-eval/pyproject.toml`，CI 双命令）
 - [x] 8.2 `cd packages/agent-eval && PYTHONPATH=src pytest tests/ -q` 全绿（含会话/事件/发现/环境身份/模拟器新测试）
 - [x] 8.3 `tests/test_import_isolation.py` 与 `tests/test_vocabulary_isolation.py` 仍通过（新 entry-point 组不得引入 `app.*`）
 - [x] 8.4 离线 `eval-suite run examples/minimal/suite.yaml` 正常产出，且分母与 0.3.0 逐字段一致（不含会话的套件零漂移）
 - [x] 8.5 一个测试包注册的自定义判据经 `eval-suite run` 命令行跑通（证明 2.4 的墙真拆掉了）
 - [x] 8.6 `openspec validate add-user-simulator-and-run-events --strict` 通过
-- [ ] 8.7 把 lint 范围从 `ruff check packages/agent-eval`（8.1 的 scope）扩到 `examples/`：`examples/achat/run_live_acceptance.py:43`（`EvalSuite` 未用）与 `:162`（`os` 未用）两处 F401 落在门覆盖不到的验收脚本里 —— 于是 8.1 是绿的而工作树并不干净；扩范围后把 8.1 的措辞一并改掉 —— 2026-09-10 复审新增
+- [x] 8.7 把 lint 范围从 `ruff check packages/agent-eval`（8.1 的 scope）扩到 `examples/`：`examples/achat/run_live_acceptance.py:43`（`EvalSuite` 未用）与 `:162`（`os` 未用）两处 F401 落在门覆盖不到的验收脚本里 —— 于是 8.1 是绿的而工作树并不干净；扩范围后把 8.1 的措辞一并改掉 —— 2026-09-10 复审新增（已完成：4 处可自动修复项经 `ruff --fix` 修复（2×I001 排序 + 2×F401，均确认真未使用）；CI lint 步骤扩为双命令，examples 用包内 pyproject 作显式 config —— 不与包内 lint 合并成一条命令，因为跨目录传 `--config` 时 isort 的 first-party 判定与包内运行不同，会对 `tests/` 误报 I001）
 
 ## 9. 宿主真流量验收（归档前置；④ 的教训直接沿用，不允许只靠离线绿就归档）
 

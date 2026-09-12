@@ -192,6 +192,87 @@ async def test_run_level_compare_flags_environment_change():
     assert "v1" in reason and "v2" in reason
 
 
+# ─── 序列化后端读回 (5.7) ────────────────────────────────────────────────────
+
+
+async def _make_storage(backend: str, tmp_path) -> Any:
+    """5.7: 内存后端不得替序列化后端作证 —— 结论在两个后端上各证一遍。"""
+    if backend == "memory":
+        return MemoryStorage()
+    from agent_eval.storage.sqlite import SqliteStorage
+
+    storage = SqliteStorage(str(tmp_path / f"envid_{backend}.db"))
+    await storage.initialize()
+    return storage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_environment_identity_blocks_miscompare_after_roundtrip(
+    backend, tmp_path
+):
+    """5.2/5.3 的结论经序列化后端读回后仍然算数 (5.7)。
+
+    SQLite 整块 JSON 存、``RunResult(**data)`` 整体重建 (storage/sqlite.py),
+    字段本身大概率不丢; 要证的是「读回之后仍参与比较判定」这条链
+    (④ 的 gate 字段正是丢在手写投影上)。
+    """
+    from agent_eval.api.routes.runs import _build_comparison
+
+    storage = await _make_storage(backend, tmp_path)
+
+    def runner_with_version(version: str) -> EvalRunner:
+        return EvalRunner(
+            agent_runner=MockAgentRunner(success_rate=1.0, **FAST),
+            trace_provider=MockTraceProvider(),
+            storage=storage,
+            environment=RecordingEnvironment(version=version),
+        )
+
+    await runner_with_version("v1").run_suite(EvalSuite(name="s", tasks=[state_task()]))
+    await runner_with_version("v2").run_suite(EvalSuite(name="s", tasks=[state_task()]))
+
+    runs = await storage.list_runs(suite_name="s")
+    assert len(runs) == 2
+    by_version = {r.evidence.environment_version: r for r in runs}
+    # 落盘-读回: 身份与版本在读回对象上完整 (5.2)
+    assert by_version["v1"].evidence.environment_identity == "pytest-sandbox"
+    # 读回后仍挡误比 (5.3): 比较走的是读回对象, 不是采集时的内存对象
+    comparison = _build_comparison(by_version["v1"], by_version["v2"])
+    assert comparison["comparable"] is False
+    reason = comparison["not_comparable_reason"]
+    assert "v1" in reason and "v2" in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_historical_row_without_identity_reads_back_unrecorded(
+    backend, tmp_path
+):
+    """变更前落盘的历史行: 两个后端读回同为「未记录」—— None 而非 'none', 不报错。
+
+    历史行的证据边界 JSON 里没有环境身份键; 模拟方式为整块 dump 后摘除
+    这两个键再按读回路径 (RunResult(**data)) 重建。
+    """
+    from agent_eval.core.types import RunResult
+
+    storage = await _make_storage(backend, tmp_path)
+    run = await make_runner(environment=None).run_suite(
+        EvalSuite(name="s", tasks=[state_task()])
+    )
+    data = run.model_dump()
+    data["evidence"].pop("environment_identity", None)
+    data["evidence"].pop("environment_version", None)
+    await storage.save_run(RunResult(**data))
+
+    loaded = await storage.get_run(run.run_id)
+    assert loaded is not None
+    # 未记录: None (「未记录」), 不是 'none' (「明确无环境」—— 历史行没资格声明的结论)
+    assert loaded.evidence.environment_identity is None
+    assert loaded.evidence.environment_identity != NO_ENVIRONMENT
+    assert loaded.evidence.environment_version is None
+
+
 # ─── fixture 声明递给环境 (5.1) ──────────────────────────────────────────────
 
 

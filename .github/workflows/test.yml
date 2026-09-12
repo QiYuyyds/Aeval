@@ -27,7 +27,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e "packages/agent-eval[api,cli,dev]"
       - name: Lint (ruff)
-        run: ruff check packages/agent-eval
+        run: |
+          ruff check packages/agent-eval
+          ruff check examples --config packages/agent-eval/pyproject.toml
       - name: Run tests
         run: |
           cd packages/agent-eval

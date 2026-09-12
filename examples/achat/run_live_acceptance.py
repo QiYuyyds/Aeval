@@ -34,15 +34,13 @@ ACHAT_BACKEND = Path(r"D:\java\project\bitdance-agenthub-main\backend")
 sys.path.insert(0, str(ACHAT_BACKEND))
 sys.path.insert(0, str(AEVAL_REPO / "packages" / "agent-eval" / "src"))
 
+from agent_eval.core.discovery import discover_extensions  # noqa: E402
+from agent_eval.core.runner import EvalRunner  # noqa: E402
+from agent_eval.core.suite import load_suite  # noqa: E402
+from agent_eval.storage.sqlite import SqliteStorage  # noqa: E402
 from app.eval_integration.config import create_aeval_runner  # noqa: E402
 from app.eval_integration.errors import AgentRunError  # noqa: E402
 from app.eval_integration.runner import PROBE_WORKSPACE_FILES  # noqa: E402
-
-from agent_eval.core.discovery import discover_extensions  # noqa: E402
-from agent_eval.core.runner import EvalRunner  # noqa: E402
-from agent_eval.core.types import EvalSuite  # noqa: E402
-from agent_eval.core.suite import load_suite  # noqa: E402
-from agent_eval.storage.sqlite import SqliteStorage  # noqa: E402
 
 
 class MultiTurnAChatRunner:
@@ -159,7 +157,6 @@ def _build_goal_llm_fn(settings):
     DeepSeek key (provider=deepseek); judge 专用凭证 (AEVAL_JUDGE_*) 未配
     时据此回退, 优先级与宿主 Guide Agent 同源。
     """
-    import os
 
     import httpx
 

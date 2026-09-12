@@ -414,14 +414,30 @@ async def test_human_message_recorded_as_harness_evidence():
     assert any(o.channel == HUMAN_MESSAGE_CHANNEL for o in evidence.user_inputs)
 
 
-# ─── 离线重放 (组 4.3 / 4.4) ─────────────────────────────────────────────────
+# ─── 离线重放 (组 4.3 / 4.4 / 4.6) ───────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_user_inputs_form_replayable_script_and_regrade_makes_zero_calls():
-    """用户侧输入序列随证据落盘; 库层重评分被评系统调用次数为零。"""
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_user_inputs_form_replayable_script_and_regrade_makes_zero_calls(
+    backend, tmp_path
+):
+    """用户侧输入序列随证据落盘; 库层重评分被评系统调用次数为零。
+
+    4.6: 同一结论在内存与序列化 (SQLite) 两个后端上各证一遍 —— 内存后端
+    不得替序列化后端作证。SQLite 走整块 ``model_dump`` 存 / ``model_validate``
+    取 (storage/sqlite.py), 字段大概率不丢; 要证的是「读回之后仍然算数」
+    这条链: 通道序 + 时刻 + 来源逐条一致, 且重放零被评调用。
+    """
     agent = TurnConsumerRunner()
-    runner = make_runner(agent)
+    if backend == "memory":
+        storage = MemoryStorage()
+    else:
+        from agent_eval.storage.sqlite import SqliteStorage
+
+        storage = SqliteStorage(str(tmp_path / f"replay_{backend}.db"))
+        await storage.initialize()
+    runner = make_runner(agent, storage=storage)
     task = conv_task(
         "t_replay",
         [code_grader()],
@@ -433,6 +449,7 @@ async def test_user_inputs_form_replayable_script_and_regrade_makes_zero_calls()
     run = await runner.run_suite(EvalSuite(name="s", tasks=[task]))
     assert agent.calls == 2
     run_id = run.run_id
+    original_script = run.trials["t_replay"][0].evidence.user_inputs
 
     # 库层重评分: 不重新运行被评系统
     calls_before = agent.calls
@@ -444,7 +461,7 @@ async def test_user_inputs_form_replayable_script_and_regrade_makes_zero_calls()
     assert [o.value for o in trial.evidence.transcript] == [
         o.value for o in run.trials["t_replay"][0].evidence.transcript
     ]
-    # 重放脚本: 首轮 + 2 轮话术 + 1 事件, 按时间升序
+    # 重放脚本: 首轮 + 2 轮话术 + 1 事件, 按时间升序; 全部为 harness 来源
     script = trial.evidence.user_inputs
     assert [o.channel for o in script] == [
         "user_prompt",
@@ -454,6 +471,11 @@ async def test_user_inputs_form_replayable_script_and_regrade_makes_zero_calls()
     ]
     moments = [o.observed_at for o in script]
     assert moments == sorted(moments)
+    assert all(o.observed_by is ObservedBy.HARNESS for o in script)
+    # 读回之后仍然算数: 通道序 + 时刻 + 来源与采集时逐条一致 (含 SQLite 读回)
+    assert [o.channel for o in script] == [o.channel for o in original_script]
+    assert [o.observed_at for o in script] == [o.observed_at for o in original_script]
+    assert [o.observed_by for o in script] == [o.observed_by for o in original_script]
 
 
 # ─── 目标驱动模拟器 (组 6) ───────────────────────────────────────────────────
