@@ -24,3 +24,15 @@ Thumbs.db
 
 # Editor-local state (Qoder)
 .qoder/
+
+# AI tool state
+.claude/
+.codex/
+.meituan-catpaw/
+
+# Run artifacts & scratch notes
+.live-run-output.txt
+testlist.txt
+
+# Personal (never commit)
+docs/eval-harness-interview-prep.md
