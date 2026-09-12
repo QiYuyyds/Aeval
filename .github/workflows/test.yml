@@ -34,6 +34,10 @@ jobs:
         run: |
           cd packages/agent-eval
           pytest tests/ -q --cov=agent_eval --cov-report=term-missing
+      - name: Statistics coverage floor (docs/architecture.md §8, ≥90%)
+        run: |
+          cd packages/agent-eval
+          pytest tests/ -q --cov=agent_eval.core.metrics --cov-report=term --cov-fail-under=90
 
   dashboard-build:
     runs-on: ubuntu-latest
@@ -51,3 +55,22 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build dashboard
         run: pnpm --filter eval-dashboard build
+
+  python-tests-windows:
+    # 观察车道 (continue-on-error): Windows 上 asyncio/SQLite/路径的行为差异
+    # 先亮红不挡合并; 稳定后转为阻塞门禁 (ubuntu 车道已是阻塞)。
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "packages/agent-eval[api,cli,dev]"
+      - name: Run tests
+        run: |
+          cd packages/agent-eval
+          pytest tests/ -q
