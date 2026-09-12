@@ -1,0 +1,68 @@
+# 04 · Aeval × 行业前沿：覆盖对照矩阵
+
+> 快照日期：2026-09-07。基准与工具出处见 [01](./01-benchmark-landscape.md)、[02](./02-harness-tooling-landscape.md)、[03](./03-methodology-themes.md)；本文聚焦"Aeval 站在哪"，附代码证据。
+
+## Aeval 是什么（一段话）
+
+OTel trace 驱动的开源 agent 评测框架：YAML 声明套件（严格校验），重复 trial（重试/并发/预算控制），9 种内置 grader 逐 trial 判分，聚合为统计严谨的 pass@k / pass^k / 一致性 / 饱和度；证据带溯源（`observed_by: harness|runner|subject`）与缺失原因清单；采集与评分分离、判定可重放（regrade / verdict_drift）；REST + SSE + Next.js 看板；MIT，自部署，全程离线可测。
+
+## 覆盖矩阵
+
+评级：**领先** = 比主流开源 harness 做得好或独有；**持平** = 行业标配 Aeval 也有；**部分** = 有机制但缺内容/闭环；**缺失** = 无（经代码验证）。
+
+| # | 主题（2025–26 行业状态） | Aeval 现状 | 评级 | 代码证据 |
+|---|------------------------|-----------|------|---------|
+| 1 | 一致性优先：pass^k、随机性形式化、区间门禁 | 无偏组合估计 + 外推标注 + Wilson/bootstrap + 饱和度防误读 | **领先** | `core/metrics.py`，`STATISTICS_VERSION="2"` |
+| 2 | 证据化评分：trace 级评分、步级/里程碑 | step-level grader + 轨迹指标（变更④默认 diagnostic）+ 判定时刻语义 | **领先**（缺里程碑清单表达法） | `graders/step_level.py`、`suite.py` |
+| 3 | 证据溯源（谁观测的） | observed_by 三级 + 两条默认规则（越级/仅自报 → invalid）+ 证据边界落盘 | **独有/领先** | `core/types.py`、`core/runner.py` |
+| 4 | 采集/评分分离 + 重放审计 | trial_evidence + grade_attempts 追加 + current 指针 + regrade/verdict_drift | **独有/领先** | `storage/sqlite.py`、`core/runner.py` |
+| 5 | OTel GenAI 底座（仍 experimental） | 版本钉定翻译表 + otel-genai/openinference 双预设 + fail-fast | **领先**（设计恰中靶心） | `trace/mapping.py`、`trace/normalize.py` |
+| 6 | 成本/时延一等轴 | 四路 token + 外部价目 + "不可算≠0" + passed/failed 分列 + 跨 run 趋势 | **领先** | `core/pricing.py`、`core/metrics.py` |
+| 7 | 多 judge 信度（κ/α 进工具 UX） | 变更④进行中（35/38）：κ/α + 自一致/信度两类分开 | **持平/进行中** | `openspec/changes/add-agent-metric-catalog` |
+| 8 | Judge 偏差缓解（swap/顺序随机化/长度控制） | 无；judge 单调用单顺序 | **缺失** | grep：swap/position_bias 无命中 |
+| 9 | 结构化 rubric 清单评分器 | rubric 为自由文本整体发 judge | **部分** | `graders/model_based.py:150` |
+| 10 | Judge 校准闭环（人工金标 → 一致率 → 用/不用） | human grader 有 REST 回调；无金标集工作流 | **部分** | `graders/human.py` |
+| 11 | 用户模拟器 / 双控（τ²-bench 模型） | 单轮静态 `prompt` 字符串 | **缺失** | `docs/yaml-format.md`（任务模型） |
+| 12 | 动态/异步事件注入（GAIA2/ARE、Inspect Intervention） | setup→run→teardown 单发；无 trial 中钩子 | **缺失** | `core/contract.py`（EnvironmentManager） |
+| 13 | 长时程 checkpoint/续跑（Inspect/Harbor） | 仅 TransientError 重试；中断即作废 | **缺失** | `core/runner.py`（重试路径） |
+| 14 | 安全评测内容（注入/外泄/金丝雀，AgentDojo 联合评分） | 门机制 ✓（乘性塌缩）；安全内容零 | **部分**（机制有、子弹无） | grep：canary/inject/exfil 无命中 |
+| 15 | 沙箱容器化（container-per-trial = table stakes） | 明确不做、亦无参照实现 | **缺失**（自报定位） | README 已知限制 |
+| 16 | 套件打包分发 / 任务包 registry（Harbor/inspect_evals） | 本地 YAML + 2 个 examples | **缺失** | `examples/` |
+| 17 | 污染卫生（canary 字段、holdout 拆分） | 无 | **缺失** | grep：canary 无命中 |
+| 18 | 两车道 CI + 基线相对回归门 | pytest 插件单车道（绝对阈值 + invalid 上限）；compare 有区间不重叠判定但未接入门禁 | **部分** | `metrics/pytest_plugin.py`、`cli.py compare` |
+| 19 | 样本量规划 / 功效分析（"还需多少 trials"） | 无；但区间公式已备齐 | **缺失**（低成本高独特性） | `core/metrics.py`（Wilson/bootstrap） |
+| 20 | 生产 trace → 离线回放闭环 | trace_mining 数据源已有；链路未文档化打通 | **部分** | `dataset/sources/trace_mining.py` |
+| 21 | 在线评测/漂移告警 | 明确反范围（dev-time 定位） | **缺失（by design）** | `docs/architecture.md` §1 |
+| 22 | 多智能体失败分类诊断 | dispatch 机制有；无协调/级联/角色混乱诊断 | **部分** | README（orchestration 未校准） |
+| 23 | 运行中人工介入（Intervention） | 无；只有结束后 human grader | **缺失** | `core/contract.py` |
+| 24 | Postgres / 规模化存储 | SQLite + Memory；PG 在 Phase 3 | **缺失（已规划）** | `storage/` |
+
+## 覆盖图（视觉摘要）
+
+```
+ 行业 2025–26 主题                        Aeval 现状
+ ═════════════════════════════════════════════════════════════════
+ 一致性优先 (pass^k/CI 门)        ██████████ 领先（无偏估计+Wilson）
+ 证据化评分 (trace grading)       ██████████ 领先（observed_by/regrade）
+ 成本/时延作一等轴               █████████  领先（四路 token+诚实成本）
+ OTel GenAI 词汇                 █████████  领先（双预设+钉版本）
+ 多 judge 一致性 κ/α             ███████░   进行中（变更④）
+ 结构化 rubric 清单评分           ███░░░░░░░ 只有自由文本 rubric
+ judge 偏差缓解（swap/集集成）    █░░░░░░░░░ 仅测量（κ/α），无缓解
+ 用户模拟器 / 双控              █░░░░░░░░░ 单轮静态 prompt
+ 动态事件 / 中途干预             █░░░░░░░░░ setup→run→teardown 单发
+ 长时程 checkpoint/续跑          ░░░░░░░░░░ 无
+ 安全评测内容（注入/外泄）        ██░░░░░░░░ 有门机制，无安全内容
+ 沙箱容器化                      ██░░░░░░░░ 明确不做（已知限制）
+ 套件分发/任务包生态              █░░░░░░░░░ 只有本地 YAML
+ 两车道 CI / 基线回归门           ███░░░░░░░ pytest 插件仅绝对阈值
+ 生产 trace 回放闭环             ████░░░░░░ trace_mining 有，链路未通
+```
+
+## 三条战略判断
+
+1. **不要追赶名单，要放大不对称优势。** 矩阵上半部（1–7）是 Aeval 的护城河：溯源、分母纪律、重放审计在对比表里没有一列同时具备。任何新特性都应接到这套证据底座上，而不是绕开它。
+2. **五块"缺失"不是并列的，交互模型层是结构性缺口。** 用户模拟器/事件注入会改套件格式与扩展点协议（`AgentRunner`/`EnvironmentManager`/`TaskView`），拖得越晚破坏性越大（与变更①③④"协议演进不留双路径"的原则一致）。
+3. **已知限制的行业权重已重排。** README 自报的限制里：沙箱缺位从"定位选择"变成"最被要求的缺失"；compare 无正式检验居中（行业普遍如此，不孤单）；regrade 无 HTTP 面、无人工评审 UI、PG 延后都排不上号——没有人因为这些选不了 Aeval。
+
+详细的空白分析与"做成什么样"见 [05-gap-analysis.md](./05-gap-analysis.md)；优先级与候选提案见 [06-optimization-roadmap.md](./06-optimization-roadmap.md)。

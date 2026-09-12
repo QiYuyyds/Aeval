@@ -52,7 +52,7 @@ eval-suite = "agent_eval.cli:main"
 Homepage = "https://github.com/QiYuyyds/Aeval"
 Repository = "https://github.com/QiYuyyds/Aeval"
 Documentation = "https://github.com/QiYuyyds/Aeval/tree/main/docs"
-Changelog = "https://github.com/QiYuyyds/Aeval/releases"
+Changelog = "https://github.com/QiYuyyds/Aeval/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
