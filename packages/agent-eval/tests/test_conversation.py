@@ -27,6 +27,7 @@ from agent_eval.core.types import (
     EVENT_CHANNEL,
     HUMAN_MESSAGE_CHANNEL,
     SIMULATED_USER_CHANNEL,
+    ConversationSpec,
     EvidenceKind,
     GraderConfig,
     GraderType,
@@ -108,11 +109,12 @@ def state_grader(**config) -> GraderConfig:
     )
 
 
-def conv_task(task_id: str, graders, **conversation) -> Any:
+def conv_task(task_id: str, graders, *, description: str = "", **conversation) -> Any:
     from agent_eval.core.types import EvalTask
 
     return EvalTask(
         id=task_id,
+        description=description,
         prompt=f"first turn of {task_id}",
         graders=graders,
         conversation=conversation or None,
@@ -558,6 +560,42 @@ async def test_goal_driven_prompt_redacted_and_view_has_no_answer_keys():
     }
 
 
+@pytest.mark.asyncio
+async def test_simulator_context_carries_task_identity(monkeypatch):
+    """SimulatorContext 的 task_id/description 来自所属 task (1.7: 不再恒为空)。
+
+    按域切人设的模拟器实现依赖这两个字段定位任务; 此前从 ConversationSpec
+    上 getattr (该模型没有这两个字段), 两字段恒为空串。
+    """
+    captured: list[SimulatorContext] = []
+
+    class InspectingGoal(GoalDrivenUserSimulator):
+        async def next_message(self, context: SimulatorContext) -> SimulatorReply | None:
+            captured.append(context)
+            return await super().next_message(context)
+
+    monkeypatch.setattr(
+        "agent_eval.core.runner.GoalDrivenUserSimulator", InspectingGoal
+    )
+    agent = TurnConsumerRunner()
+    runner = make_runner(agent, llm_fn=StubLLM(["好的", GOAL_END_SENTINEL]))
+    task = conv_task(
+        "t_identity",
+        [code_grader()],
+        description="采购咨询任务-按域切人设",
+        goal="目标G",
+    )
+    from agent_eval.core.types import EvalSuite
+
+    run = await runner.run_suite(EvalSuite(name="s", tasks=[task]))
+
+    assert captured, "模拟器至少被调用一次"
+    assert captured[0].task_id == "t_identity" and captured[0].task_id != ""
+    assert captured[0].description == "采购咨询任务-按域切人设"
+    trial = run.trials["t_identity"][0]
+    assert trial.verdict is TrialVerdict.VALID
+
+
 # ─── 套件校验 (组 1.5) ───────────────────────────────────────────────────────
 
 
@@ -583,6 +621,58 @@ tasks:
         load_suite(path)
     assert "conversation.turns" in str(exc.value)
     assert "conversation.goal" in str(exc.value)
+
+
+def test_events_without_turn_supplier_rejected_with_field_path(tmp_path):
+    """events 非空而 turns/goal 均空 → 加载失败 (1.8: 无轮次供给方即永不注入)。
+
+    此前这种套件加载通过、run 正常出分而事件一条没发生 —— 「机制从未执行」类。
+    """
+    suite_yaml = """
+name: events-only
+version: 1.0.0
+tasks:
+  - id: t1
+    prompt: p
+    graders:
+      - type: code
+        name: code_based
+        config: {}
+    conversation:
+      events:
+        - after_turn: 0
+          message: 外部注入
+"""
+    path = tmp_path / "suite.yaml"
+    path.write_text(suite_yaml, encoding="utf-8")
+    with pytest.raises(SuiteLoadError) as exc:
+        load_suite(path)
+    assert "conversation.events" in str(exc.value)
+    assert "无轮次供给方" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_present_when_conversation_declared():
+    """task 声明了会话维度 → 轮级诊断块不整体缺席 (1.8 的确认面)。
+
+    校验保证「有会话维度必有轮次供给方」, 从而 diagnostics() 对声明了
+    会话的 task 不会因 simulator 缺席而整体返回 None。
+    """
+    agent = TurnConsumerRunner()
+    runner = make_runner(agent)
+    task = conv_task(
+        "t_diag",
+        [code_grader()],
+        turns=["r2"],
+        events=[{"after_turn": 1, "message": "事件"}],
+    )
+    from agent_eval.core.types import EvalSuite
+
+    run = await runner.run_suite(EvalSuite(name="s", tasks=[task]))
+    diag = run.trials["t_diag"][0].session_diagnostics
+    assert diag is not None
+    assert diag["turns_declared"] == 1
+    assert diag["events_injected"] == 1
 
 
 def test_suite_without_conversation_loads_byte_identical(tmp_path):
@@ -623,3 +713,38 @@ def test_scripted_simulator_exhaustion_ends_session():
     assert first == "只有一句"
     assert second is None
     assert session.end_reason == "simulator_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_max_turns_checked_before_requesting_from_simulator():
+    """轮数上限在索取之前生效 (3.7): 触顶那一次模拟器调用计数不再增加。
+
+    此前在 ``next_message`` 之后才查 max_turns, 触顶那次先生成一句话术再
+    丢弃 (真流量下即一次白付的模型调用), 该句若带 end=True 其收尾意图
+    一并丢失。
+    """
+    calls: list[SimulatorContext] = []
+
+    class CountingSimulator:
+        name = "counting"
+        implementation_version = "0"
+
+        async def next_message(self, context: SimulatorContext) -> SimulatorReply | None:
+            calls.append(context)
+            return SimulatorReply(text=f"话术 {len(calls)}")
+
+    session = TrialSession(
+        simulator=CountingSimulator(),  # type: ignore[arg-type]
+        conversation=ConversationSpec(goal="目标", max_turns=2),
+        first_user_message="first",
+    )
+    first = await session.next_user_message()
+    second = await session.next_user_message()
+    third = await session.next_user_message()
+
+    assert (first, second) == ("话术 1", "话术 2")
+    assert third is None
+    assert len(calls) == 2  # 触顶那一次: 不再向模拟器索取
+    assert session.end_reason == "max_turns_reached"
+    assert session.conversation_ended
+    assert session.turns_consumed == 2

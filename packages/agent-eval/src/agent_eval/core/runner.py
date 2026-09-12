@@ -876,6 +876,8 @@ class EvalRunner:
             simulator=simulator,
             conversation=task.conversation,
             first_user_message=task.prompt if simulator is not None else None,
+            task_id=task.id,
+            task_description=task.description or "",
         )
         evidence = TrialEvidence(capture=capture)
         extraction = ProcessMetrics()
@@ -1187,8 +1189,10 @@ class EvalRunner:
                 llm_fn=self.llm_fn,
                 redactor=self.redactor,
             )
-        # 只声明了 events (无 turns/goal): 没有轮次供给方, 会话即刻结束 ——
-        # 适配器一次 next_user_message 都拿不到, 单轮适配器行为不变
+        # 只声明了 events (无 turns/goal): 套件校验已在加载期拒绝
+        # (types.ConversationSpec: 无轮次供给方即永不注入) —— 这里是防御分支,
+        # 供绕过加载校验、直接构造 EvalTask 的调用方: 没有轮次供给方就没有
+        # 模拟器, 会话即刻结束, 单轮适配器行为不变
         return None
 
     async def _finish_collection(

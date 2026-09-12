@@ -340,12 +340,19 @@ class ConversationSpec(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_turns_goal_mutex(self) -> ConversationSpec:
+    def _validate_conversation_shape(self) -> ConversationSpec:
         if self.turns and self.goal:
             raise ValueError(
                 "conversation.turns 与 conversation.goal 不可并存: turns 声明固定轮次, "
                 "goal 声明由模拟器自行决定轮数, 同时给出即自相矛盾 "
                 "(固定轮次请删 goal, 目标驱动请删 turns)"
+            )
+        if self.events and not self.turns and not self.goal:
+            raise ValueError(
+                "conversation.events 声明了事件注入, 但既无 turns 也无 goal —— "
+                "没有轮次供给方, 事件永远等不到自己的注入时刻 (无轮次供给方即永不注入, "
+                "套件会照常出分而事件一条没发生)。请为 conversation 声明 turns 或 goal, "
+                "或删除 events"
             )
         schedule_points = [e.after_turn for e in self.events]
         duplicated = sorted({p for p in schedule_points if schedule_points.count(p) > 1})

@@ -9,8 +9,8 @@
 
 _以下两条为 2026-09-10 复审新增（spec: extension-contracts「模拟器知道自己在为哪个任务工作」、suite-format「只声明事件而未声明轮次供给方」）_
 
-- [ ] 1.7 `SimulatorContext.task_id` 与 `description` 目前**结构上恒为空**：`runner.py:868-879` 只把 `task.conversation` 交给会话，而 `ConversationSpec`（`types.py:312`）没有 `id`/`description` 字段，于是 `contract.py:367-368` 的 `getattr(self._conversation, "id", "")` 永远取到 `""`。改为构造 `TrialSession` 时显式传入 task 标识与描述并在装配 `SimulatorContext` 时使用；单测断言两字段非空且等于该 task（按域切人设的模拟器实现依赖它们）
-- [ ] 1.8 `ConversationSpec` 校验（`types.py:343`）新增拒绝：`events` 非空而 `turns` 与 `goal` 均为空时加载失败，错误信息点名 `conversation.events` 并说明「无轮次供给方即永不注入」；同时确认 `TrialSession.diagnostics()`（`contract.py:480-482`）在 task 声明了会话维度时不整体缺席 —— 现状 `runner.py:1190-1192` 让这种套件加载通过、run 正常出分而事件一条没发生，属 ④ 的「机制从未执行」类
+- [x] 1.7 `SimulatorContext.task_id` 与 `description` 目前**结构上恒为空**：`runner.py:868-879` 只把 `task.conversation` 交给会话，而 `ConversationSpec`（`types.py:312`）没有 `id`/`description` 字段，于是 `contract.py:367-368` 的 `getattr(self._conversation, "id", "")` 永远取到 `""`。改为构造 `TrialSession` 时显式传入 task 标识与描述并在装配 `SimulatorContext` 时使用；单测断言两字段非空且等于该 task（按域切人设的模拟器实现依赖它们）
+- [x] 1.8 `ConversationSpec` 校验（`types.py:343`）新增拒绝：`events` 非空而 `turns` 与 `goal` 均为空时加载失败，错误信息点名 `conversation.events` 并说明「无轮次供给方即永不注入」；同时确认 `TrialSession.diagnostics()`（`contract.py:480-482`）在 task 声明了会话维度时不整体缺席 —— 现状 `runner.py:1190-1192` 让这种套件加载通过、run 正常出分而事件一条没发生，属 ④ 的「机制从未执行」类
 
 ## 2. 扩展点发现与装配（前置件，与 1 无依赖、可并行开工）
 
@@ -29,7 +29,7 @@ _以下两条为 2026-09-10 复审新增（spec: extension-contracts「模拟器
 - [x] 3.4 轮级过程量（每轮 token、是否自纠、事件后状态）只进 ④ 的诊断块，不进通过率/pass^k/任何分母
 - [x] 3.5 端到端：同一多轮任务跑 N 个 trial，`statistics_version` 仍为 2、分母为 N 而非 N×轮数；与不含会话的对照套件在通过率上逐字段可比
 - [x] 3.6 单测 + MockRunner 多轮脚本：正常多轮、早退适配器、中途取消三种形状
-- [ ] 3.7 轮数上限改到**索取之前**判定：现状 `contract.py:391-395` 在 `await simulator.next_message(...)` 之后才查 `max_turns`，触顶那次会先生成一句话术再丢弃（真流量下即一次白付的模型调用），且该句若带 `end=True` 其收尾意图一并丢失；单测断言触顶那一次的模拟器调用计数不再增加（spec: extension-contracts「轮数上限在生成之前生效」）—— 2026-09-10 复审新增
+- [x] 3.7 轮数上限改到**索取之前**判定：现状 `contract.py:391-395` 在 `await simulator.next_message(...)` 之后才查 `max_turns`，触顶那次会先生成一句话术再丢弃（真流量下即一次白付的模型调用），且该句若带 `end=True` 其收尾意图一并丢失；单测断言触顶那一次的模拟器调用计数不再增加（spec: extension-contracts「轮数上限在生成之前生效」）—— 2026-09-10 复审新增
 
 ## 4. 事件证据与离线重放
 

@@ -203,6 +203,8 @@ class TrialSession:
         simulator: UserSimulator | None = None,
         conversation: Any | None = None,
         first_user_message: str | None = None,
+        task_id: str = "",
+        task_description: str = "",
     ):
         """
         Args:
@@ -214,10 +216,15 @@ class TrialSession:
             conversation: 会话声明 (ConversationSpec; 事件排程/目标/轮数上限)
             first_user_message: 首轮用户输入 (仅供用户侧输入序列落盘; 声明了
                 会话才会记录)
+            task_id: 所属 task 的标识 (进 SimulatorContext, 供按域切人设的
+                模拟器实现定位任务; 由框架在构造会话时显式传入)
+            task_description: 所属 task 的人类可读描述 (同上, 进 SimulatorContext)
         """
         self._probe = probe
         self.deadline_ms = deadline_ms
         self._cancelled = cancelled or (lambda: False)
+        self.task_id = task_id
+        self.task_description = task_description
         self.emitted: list[Observation] = []
         self.probe_readings: list[Observation] = []
         self._last_moment = 0.0
@@ -364,13 +371,23 @@ class TrialSession:
         if self.conversation_ended:
             return None
         context = SimulatorContext(
-            task_id=str(getattr(self._conversation, "id", "") or ""),
-            description=str(getattr(self._conversation, "description", "") or ""),
+            task_id=self.task_id,
+            description=self.task_description,
             first_prompt=self._first_prompt(),
             goal=getattr(self._conversation, "goal", None),
             history=list(self._history),
             max_turns=getattr(self._conversation, "max_turns", None),
         )
+        # 轮数上限在**索取之前**判定: 触顶那一次不再向模拟器要话术 ——
+        # 先生成再丢弃等于真流量下白付一次模型调用, 且该句若带收尾意图
+        # 还会一并丢失 (spec: extension-contracts「轮数上限在生成之前生效」)
+        if (
+            context.max_turns is not None
+            and self.turns_consumed >= context.max_turns
+        ):
+            self.conversation_ended = True
+            self.end_reason = "max_turns_reached"
+            return None
         reply = await self._simulator.next_message(context)
         if reply is None:
             self.conversation_ended = True
@@ -386,13 +403,6 @@ class TrialSession:
             # 纯收尾信号 (无附带话术): 目标达成, 会话就此结束, 不多消费一轮
             self.conversation_ended = True
             self.end_reason = "goal_achieved"
-            return None
-        if (
-            context.max_turns is not None
-            and self.turns_consumed >= context.max_turns
-        ):
-            self.conversation_ended = True
-            self.end_reason = "max_turns_reached"
             return None
         self.turns_consumed += 1
         moment = self._next_moment()
