@@ -38,7 +38,7 @@ _以下两条为 2026-09-10 复审新增（spec: extension-contracts「模拟器
 - [x] 4.3 用户侧输入序列（首轮 + 话术/模拟产物 + 事件 + 人工介入）随 trial 证据落盘，构成可重放脚本
 - [x] 4.4 库层重评消费已存用户输入：一次基于证据的重评分中被评系统调用次数为零，被评方输出不因重放而改写
 - [x] 4.5 单测：事件注入的时序确定性（离线 e2e）；重放路径断言 agent 调用计数为 0
-- [ ] 4.6 补序列化后端的读回腿：`TrialEvidence.user_inputs` 是本轮新字段，而现有断言全部只在内存后端成立 —— `tests/test_conversation.py:141` 的 `make_runner` 默认 `storage=MemoryStorage()`，组 4.3/4.4 的两条结论都没走过 SQLite 的落盘→读出路径。措辞要准确：该后端整块 `model_dump` 存、`TrialEvidence.model_validate` 取（`storage/sqlite.py:285-312`），字段本身大概率不丢，缺的是**「读回之后仍然算数」这条链从未被证**——读出后还要被重放路径与手写投影消费（④ 的 gate 字段就丢在手写投影上）。把「通道序 + 时刻 + 来源逐条一致」与「重放零被评调用」两条断言参数化到 Memory 与 SQLite 两个后端（spec: orchestration「内存后端不得替序列化后端作证」）—— 2026-09-10 复审新增
+- [x] 4.6 补序列化后端的读回腿：`TrialEvidence.user_inputs` 是本轮新字段，而现有断言全部只在内存后端成立 —— `tests/test_conversation.py:141` 的 `make_runner` 默认 `storage=MemoryStorage()`，组 4.3/4.4 的两条结论都没走过 SQLite 的落盘→读出路径。措辞要准确：该后端整块 `model_dump` 存、`TrialEvidence.model_validate` 取（`storage/sqlite.py:285-312`），字段本身大概率不丢，缺的是**「读回之后仍然算数」这条链从未被证**——读出后还要被重放路径与手写投影消费（④ 的 gate 字段就丢在手写投影上）。把「通道序 + 时刻 + 来源逐条一致」与「重放零被评调用」两条断言参数化到 Memory 与 SQLite 两个后端（spec: orchestration「内存后端不得替序列化后端作证」）—— 2026-09-10 复审新增
 
 ## 5. 环境初始态与身份（不引入串行化）
 
@@ -48,7 +48,7 @@ _以下两条为 2026-09-10 复审新增（spec: extension-contracts「模拟器
 - [x] 5.4 声明了环境检查判据却未装配任何环境 → 证据不足并指明缺环境装配，不折成被评方失败
 - [x] 5.5 生命周期与并发不变测试：per-trial 建/拆、trial 仍并发、`verify_clean` 检出泄漏仍是「告警 + restore」不判失败
 - [x] 5.6 单测：同一 fixture 声明跑两次得到相同的环境身份记录；换初始态声明后与历史 run 判为不可比
-- [ ] 5.7 把 5.2/5.3 的两条结论在序列化后端上证一遍：`tests/test_environment_identity.py:91` 只装配 `MemoryStorage()`，因此 `EvidenceBoundary.environment_identity` / `environment_version` 的落盘-读回、以及读回后仍触发 `not_comparable_reason` 这条链从未在 SQLite 路径上断言。机制上说清楚以免白找：该后端整块 JSON 存、`RunResult(**data)` 整体重建（`storage/sqlite.py:151-152`），字段本身大概率不丢，要证的是「读回之后仍参与比较判定」这条链（④ 的 gate 字段正是丢在手写投影上）。同时断言变更前落盘的历史行在两个后端读回同为「未记录」（既不为 `none` 也不报错）（spec: storage「环境身份经序列化后端读回后仍能挡住误比」）—— 2026-09-10 复审新增
+- [x] 5.7 把 5.2/5.3 的两条结论在序列化后端上证一遍：`tests/test_environment_identity.py:91` 只装配 `MemoryStorage()`，因此 `EvidenceBoundary.environment_identity` / `environment_version` 的落盘-读回、以及读回后仍触发 `not_comparable_reason` 这条链从未在 SQLite 路径上断言。机制上说清楚以免白找：该后端整块 JSON 存、`RunResult(**data)` 整体重建（`storage/sqlite.py:151-152`），字段本身大概率不丢，要证的是「读回之后仍参与比较判定」这条链（④ 的 gate 字段正是丢在手写投影上）。同时断言变更前落盘的历史行在两个后端读回同为「未记录」（既不为 `none` 也不报错）（spec: storage「环境身份经序列化后端读回后仍能挡住误比」）—— 2026-09-10 复审新增
 
 ## 6. 目标驱动模拟器（LLM 侧）
 

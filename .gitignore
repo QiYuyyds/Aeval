@@ -9,6 +9,7 @@ build/
 .ruff_cache/
 *.db
 *.sqlite3
+.coverage
 
 # Node / Next.js (dashboard)
 node_modules/
