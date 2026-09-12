@@ -15,13 +15,20 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import agent_eval
+from agent_eval.core.comparison import BaselineVerdict
+from agent_eval.core.runner import EvalRunner
+from agent_eval.core.suite import load_suite
 from agent_eval.core.types import MeasurementContext
+from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
+from agent_eval.metrics import pytest_plugin as aeval_plugin
 from agent_eval.metrics.base import MetricResult
 from agent_eval.metrics.llm_judge import LLMNotConfiguredError
+from agent_eval.storage.memory import MemoryStorage
 
 
 def _stub_llm(score: float = 0.9, reason: str = "stub ok"):
@@ -281,3 +288,253 @@ class TestSuiteGate:
 
         assert proc.returncode != 0, proc.stdout
         assert "GATE ERROR" in proc.stdout
+
+
+# ─── Part 3: 基线相对门 (--eval-baseline, in-process 单测, 变更⑥ tasks 4.1–4.3) ──
+
+
+def _gate_suite_yaml(task_id: str, contains: str, max_trials: int) -> str:
+    return f"""\
+name: mock-gate-baseline
+version: 1.0.0
+tasks:
+  - id: {task_id}
+    prompt: "hello"
+    graders:
+      - type: code
+        name: code_based
+        config:
+          checks:
+            - type: contains
+              value: "{contains}"
+              target: transcript
+    max_trials: {max_trials}
+"""
+
+
+class _Reporter:
+    """terminalreporter 桩: 抓取 write_line/write_sep 文本。"""
+
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def write_sep(self, *_args, **_kwargs):
+        self.lines.append("====")
+
+    def write_line(self, line):
+        self.lines.append(line)
+
+
+def _apply_gate(plugin) -> SimpleNamespace:
+    session = SimpleNamespace(
+        config=SimpleNamespace(option=SimpleNamespace(collectonly=False)),
+        testsfailed=0,
+    )
+    plugin._apply_gate(session)
+    return session
+
+
+def _baseline_factory(tmp_path: Path, baseline_yaml: str, gate_yaml: str):
+    """异步工厂: 先在同一 runner + MemoryStorage 上跑基线 suite (指定 run_id
+    供 --eval-baseline 查找)。
+
+    基线与门禁 suite 用同一 task id — 证据边界 (capture_by_task 等) 按 task
+    键记录, id 不同会被判不可比。成败由 code_based 的 contains 判据控制
+    (transcript 恒含 "Mock response for task: …", 判据值决定成败), 与 mock
+    脚本行为无关。"""
+    baseline_path = tmp_path / "baseline-suite.yaml"
+    baseline_path.write_text(baseline_yaml, encoding="utf-8")
+    gate_path = tmp_path / "gate-suite.yaml"
+    gate_path.write_text(gate_yaml, encoding="utf-8")
+
+    async def _factory():
+        runner = EvalRunner(
+            agent_runner=MockAgentRunner(success_rate=1.0, latency_range=(0.0, 0.01)),
+            trace_provider=MockTraceProvider(),
+            storage=MemoryStorage(),
+        )
+        await runner.run_suite(load_suite(str(baseline_path)), run_id="run_baseline")
+        return runner
+
+    return _factory
+
+
+def _gate_plugin(tmp_path: Path, gate_yaml: str, baseline_run_id: str | None):
+    gate_path = tmp_path / "gate-suite.yaml"
+    gate_path.write_text(gate_yaml, encoding="utf-8")
+    return aeval_plugin.SuiteGatePlugin(
+        str(gate_path),
+        0.7,
+        baseline_run_id=baseline_run_id,
+    )
+
+
+def _pair(tmp_path, monkeypatch, *, baseline_contains, gate_contains, baseline_trials=10):
+    """基线 + 门禁 suite 对 (同一 task id, 用判据值控制两侧成败)。"""
+    baseline_yaml = _gate_suite_yaml("task_gate", baseline_contains, baseline_trials)
+    gate_yaml = _gate_suite_yaml("task_gate", gate_contains, 2)
+    monkeypatch.setattr(
+        aeval_plugin,
+        "_eval_runner_factory",
+        _baseline_factory(tmp_path, baseline_yaml, gate_yaml),
+    )
+    return _gate_plugin(tmp_path, gate_yaml, "run_baseline")
+
+
+class TestBaselineGate:
+    def test_baseline_gate_triggers_on_significant_regression(self, tmp_path, monkeypatch):
+        """基线 10/10 全对 [0.722, 1.0], 本次 0/2 全错 [0, 0.658] → 显著变差。"""
+        plugin = _pair(
+            tmp_path,
+            monkeypatch,
+            baseline_contains="Mock response",
+            gate_contains="NEVER_PRESENT",
+        )
+
+        session = _apply_gate(plugin)
+
+        assert plugin.baseline_comparison is not None
+        assert plugin.baseline_comparison.verdict is BaselineVerdict.SIGNIFICANTLY_WORSE
+        assert plugin.baseline_failed is True
+        assert plugin.failed is True
+        assert session.testsfailed == 1
+
+        reporter = _Reporter()
+        plugin.pytest_terminal_summary(reporter, None)
+        text = "\n".join(reporter.lines)
+        assert "Baseline gate (--eval-baseline run_baseline):" in text
+        assert "verdict: significantly_worse" in text
+        assert "BASELINE GATE FAILED (significantly_worse)" in text
+
+    def test_only_threshold_gate_triggers_and_output_names_it(self, tmp_path, monkeypatch):
+        """Scenario: 只有阈值门触发 — 输出点名阈值门, 基线门如实报通过。"""
+        plugin = _pair(
+            tmp_path,
+            monkeypatch,
+            baseline_contains="NEVER_PRESENT",
+            gate_contains="NEVER_PRESENT",
+        )
+
+        session = _apply_gate(plugin)
+
+        # 阈值门: pass@1 0.0 < 0.7; 基线门: 两区间重叠 [0, 0.278] vs [0, 0.658] → 通过
+        assert plugin.failed is True
+        assert plugin.baseline_failed is False
+        assert plugin.baseline_comparison.verdict is BaselineVerdict.NOT_SIGNIFICANT
+        assert session.testsfailed == 1
+
+        reporter = _Reporter()
+        plugin.pytest_terminal_summary(reporter, None)
+        text = "\n".join(reporter.lines)
+        assert "GATE FAILED: pass@1 0.0000 < threshold 0.7000" in text
+        assert "BASELINE GATE PASSED (not_significant)" in text
+
+    def test_both_gates_pass(self, tmp_path, monkeypatch):
+        """双门都过: 无失败, testsfailed 不增。"""
+        plugin = _pair(
+            tmp_path,
+            monkeypatch,
+            baseline_contains="NEVER_PRESENT",
+            gate_contains="Mock response",
+        )
+
+        session = _apply_gate(plugin)
+
+        # 阈值门: 1.0 >= 0.7; 基线门: 新区间整体高于基线 → improved (通过)
+        assert plugin.failed is False
+        assert session.testsfailed == 0
+        assert plugin.baseline_comparison.verdict is BaselineVerdict.IMPROVED
+
+        reporter = _Reporter()
+        plugin.pytest_terminal_summary(reporter, None)
+        text = "\n".join(reporter.lines)
+        assert "GATE PASSED: pass@1 1.0000 >= threshold 0.7000" in text
+        assert "BASELINE GATE PASSED (improved)" in text
+
+    def test_not_comparable_fails_the_gate(self, tmp_path, monkeypatch):
+        """基线统计口径不同 → 不可比 → 门禁失败 (宁可红不可哑)。"""
+        gate_yaml = _gate_suite_yaml("task_gate", "Mock response", 2)
+
+        async def _factory():
+            runner = EvalRunner(
+                agent_runner=MockAgentRunner(success_rate=1.0, latency_range=(0.0, 0.01)),
+                trace_provider=MockTraceProvider(),
+                storage=MemoryStorage(),
+            )
+            await runner.run_suite(
+                load_suite(str(tmp_path / "baseline-suite.yaml")), run_id="run_baseline"
+            )
+            # 事后把基线 run 改成旧口径 (模拟历史 run)
+            baseline = await runner.storage.get_run("run_baseline")
+            baseline.statistics_version = "1"
+            await runner.storage.save_run(baseline)
+            return runner
+
+        (tmp_path / "baseline-suite.yaml").write_text(
+            _gate_suite_yaml("task_gate", "Mock response", 10), encoding="utf-8"
+        )
+        (tmp_path / "gate-suite.yaml").write_text(gate_yaml, encoding="utf-8")
+        monkeypatch.setattr(aeval_plugin, "_eval_runner_factory", _factory)
+        plugin = _gate_plugin(tmp_path, gate_yaml, "run_baseline")
+
+        session = _apply_gate(plugin)
+
+        assert plugin.baseline_failed is True
+        assert plugin.baseline_comparison.verdict is BaselineVerdict.NOT_COMPARABLE
+        assert plugin.failed is True
+        assert session.testsfailed == 1
+
+    def test_missing_baseline_run_fails_loudly(self, tmp_path, monkeypatch):
+        """基线 run 不存在 → 门禁失败并给可读错误 (静默放行是 CI 事故)。"""
+        gate_yaml = _gate_suite_yaml("task_gate", "Mock response", 2)
+
+        def _sync_factory():
+            return EvalRunner(
+                agent_runner=MockAgentRunner(success_rate=1.0, latency_range=(0.0, 0.01)),
+                trace_provider=MockTraceProvider(),
+                storage=MemoryStorage(),
+            )
+
+        monkeypatch.setattr(aeval_plugin, "_eval_runner_factory", _sync_factory)
+        plugin = _gate_plugin(tmp_path, gate_yaml, "run_nope")
+
+        _apply_gate(plugin)
+
+        assert plugin.baseline_error is not None
+        assert "not found" in plugin.baseline_error
+        assert plugin.baseline_failed is True
+        assert plugin.failed is True
+
+        reporter = _Reporter()
+        plugin.pytest_terminal_summary(reporter, None)
+        assert "BASELINE GATE ERROR: baseline run 'run_nope' not found" in "\n".join(
+            reporter.lines
+        )
+
+    def test_without_baseline_option_plugin_unchanged(self, tmp_path, monkeypatch):
+        """未传 --eval-baseline: 行为与今天一致 — 无基线块, 判定只看阈值。"""
+        gate_yaml = _gate_suite_yaml("task_gate", "Mock response", 2)
+
+        def _sync_factory():
+            return EvalRunner(
+                agent_runner=MockAgentRunner(success_rate=1.0, latency_range=(0.0, 0.01)),
+                trace_provider=MockTraceProvider(),
+                storage=MemoryStorage(),
+            )
+
+        monkeypatch.setattr(aeval_plugin, "_eval_runner_factory", _sync_factory)
+        plugin = _gate_plugin(tmp_path, gate_yaml, None)
+
+        assert plugin.baseline_run_id is None
+        _apply_gate(plugin)
+
+        assert plugin.failed is False
+        assert plugin.baseline_comparison is None
+        assert plugin.baseline_failed is False
+        assert plugin.baseline_error is None
+
+        reporter = _Reporter()
+        plugin.pytest_terminal_summary(reporter, None)
+        text = "\n".join(reporter.lines)
+        assert "GATE PASSED: pass@1 1.0000 >= threshold 0.7000" in text
+        assert "Baseline gate" not in text

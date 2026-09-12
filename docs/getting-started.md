@@ -166,6 +166,7 @@ class MyAgentRunner:
 - [Grader 参考](./grader-reference.md) — 9 个内置评分器
 - [CLI 参考](./cli-reference.md) — 全部命令与选项
 - [架构](./architecture.md) — 模块与数据流
+- [回放线上流量](./integration-guide.md#14-回放线上流量trace--任务--套件--定时回归) — 从生产 trace 挖任务、套件化、定时回归（可跑示例：[examples/trace-replay](../examples/trace-replay/)）
 
 ## 升级到 0.4.0（从 0.3.x）
 

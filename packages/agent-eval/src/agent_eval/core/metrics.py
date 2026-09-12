@@ -158,6 +158,10 @@ def _z_score(confidence: float) -> float:
     return NormalDist().inv_cdf((1.0 + confidence) / 2.0)
 
 
+#: 默认置信水平 (95%) 下的双侧 z 值 — 功效输出自陈公式时引用, 不在展示层重算
+Z_SCORE_AT_DEFAULT_CONFIDENCE = _z_score(DEFAULT_CONFIDENCE_LEVEL)
+
+
 def wilson_interval(
     successes: int,
     n: int,
@@ -172,6 +176,78 @@ def wilson_interval(
     centre = (p + z * z / (2 * n)) / denom
     spread = (z / denom) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
     return max(0.0, centre - spread), min(1.0, centre + spread)
+
+
+# ─── Power analysis (样本量规划; 全闭式, 零新依赖, design D3) ─────────────────
+
+
+def wilson_half_width(
+    p: float,
+    n: int,
+    confidence: float = DEFAULT_CONFIDENCE_LEVEL,
+) -> float:
+    """Wilson 区间在比例 p、样本 n 下的半宽 (未做 0/1 截断的纯宽度轴)。
+
+    与 :func:`wilson_interval` 同一公式: spread = (z/denom)·√(p(1-p)/n + z²/(4n²))，
+    denom = 1 + z²/n。``wilson_interval`` 会把区间端点截到 [0, 1]，反解需要
+    单调连续的宽度函数，所以这里返回截断前的 spread。对 n 单调下降。
+    """
+    z = _z_score(confidence)
+    denom = 1.0 + z * z / n
+    return (z / denom) * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n))
+
+
+def wilson_sample_size(
+    p: float,
+    delta: float,
+    confidence: float = DEFAULT_CONFIDENCE_LEVEL,
+) -> int:
+    """最小有效 trial 数 N 使 Wilson 区间半宽 ≤ delta ("±δ 内分辨通过率"问法)。
+
+    公式: 由 spread(p, n)² ≤ δ² 展开为二次方程 ``a·n² + b·n + c ≥ 0``
+    (a = δ², b = z²(2δ² − p(1−p)), c = z⁴(δ² − ¼))，取其正根向上取整得初值，
+    再用 :func:`wilson_half_width` 正向校验并按需 +1，吸收浮点误差。
+
+    适用条件: 通过率的区间宽度规划，要求 0 < δ < 0.5（半宽超过 0.5 无意义）；
+    p 是假设的基线通过率（规划用途，缺省取 0.5 最保守 — 真实 p 越极端区间
+    越窄）。与 :func:`wilson_interval` 同源同测：算出的 N 反代回去半宽必 ≤ δ。
+    """
+    if not 0.0 < delta < 0.5:
+        raise ValueError(f"delta 必须在 (0, 0.5) 开区间内, 得到 {delta!r}")
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"p 必须在 [0, 1] 内, 得到 {p!r}")
+    z = _z_score(confidence)
+    a = delta * delta
+    b = z * z * (2.0 * a - p * (1.0 - p))
+    c = z**4 * (a - 0.25)
+    root = (-b + math.sqrt(b * b - 4.0 * a * c)) / (2.0 * a)
+    n = max(1, math.floor(root))
+    while wilson_half_width(p, n, confidence) > delta:
+        n += 1
+    return n
+
+
+def normal_two_sample_size(
+    d: float,
+    sigma: float,
+    alpha: float = 0.05,
+) -> int:
+    """分辨两版本分数差异 d 所需的每组样本数 (双样本正态近似, 闭式)。
+
+    公式: ``n = 2·(z_{α/2}·σ/d)²``，其中 z_{α/2} = Φ⁻¹(1 − α/2)（α=0.05 时
+    z ≈ 1.960）。这是「差异 d 恰好触及显著性边界」的最小样本（等价于功效
+    50% 的读法）；要以更高概率检出，需另加 z_β 项，本框架不引入。
+
+    适用条件与局限: 连续分数、近似正态、两版本样本量相等；**小样本与偏态
+    分布下偏乐观** — 输出的 N 应当被当作下限并留余量。σ 取已落盘 run 的
+    实测分数标准差 (:class:`ScoreDistribution.std_dev`)。
+    """
+    if d <= 0.0:
+        raise ValueError(f"d 必须为正, 得到 {d!r}")
+    if sigma < 0.0:
+        raise ValueError(f"sigma 不能为负, 得到 {sigma!r}")
+    z = _z_score(1.0 - alpha)
+    return max(1, math.ceil(2.0 * (z * sigma / d) ** 2))
 
 
 def percentile(values: list[float], q: float) -> float | None:

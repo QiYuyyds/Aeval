@@ -21,13 +21,20 @@ Fixtures:
 
 Suite 门禁:
     pytest --eval-suite=suite.yaml --eval-threshold=0.7 [--eval-invalid-limit=0.2]
+    pytest --eval-suite=suite.yaml --eval-baseline=<run_id]
 
 常规测试循环结束后执行 suite 评测, terminal summary 打印修正后的 pass@k
 (实测区间为组合无偏估计, 外推项带 * 标注)、分母计数与 pass@1 的 95% 区间。
-两条失败条件: 实测 `pass@1` 低于阈值或有效样本为 0 (证据不足, 含全 pending),
-以及 `invalid` trial 占比超过上限 (评测本身不可信 — 输出「评测侧问题」而非
-agent 表现结论)。任一成立都置 session.testsfailed (退出码非 0)。
-评测 runner 装配与 eval_runner fixture 同源 (set_eval_runner_factory 可覆盖)。
+三条互相独立的失败条件 (任一成立都置 session.testsfailed, 退出码非 0,
+terminal summary 点名触发的是哪个门):
+1. 绝对阈值门: 实测 `pass@1` 低于阈值或有效样本为 0 (证据不足, 含全 pending);
+2. 评测可信度: `invalid` trial 占比超过上限 (评测本身不可信 — 输出「评测侧
+   问题」而非 agent 表现结论);
+3. 基线相对门 (--eval-baseline): 与指定基线 run 比较后显著变差 / 不可比 /
+   不可判 (core.comparison.compare_baseline 同一语义 — 与 CLI run --baseline、
+   REST compare 三处同源; 宁可红不可哑, 不可比不许静默放行)。
+评测 runner 装配与 eval_runner fixture 同源 (set_eval_runner_factory 可覆盖);
+基线 run 从同一 runner 的 storage 读取。
 """
 
 from __future__ import annotations
@@ -39,6 +46,11 @@ from typing import Any
 
 import pytest
 
+from agent_eval.core.comparison import (
+    BASELINE_GATE_FAILURES,
+    BaselineComparison,
+    format_baseline_report,
+)
 from agent_eval.core.types import DEFAULT_INVALID_RATIO_LIMIT, MeasurementContext, RunResult
 from agent_eval.metrics import (
     AnswerRelevancyMetric,
@@ -184,10 +196,12 @@ def eval_runner():
 class SuiteGatePlugin:
     """--eval-suite 门禁: 测试循环结束后跑 suite, 打印修正后的 pass@k 并判定。
 
-    两条独立的失败条件 (两者都构成不可放行):
-    1. agent 表现: 修正后的实测 `pass@1` (分母已排除 invalid/pending) 低于阈值,
-       或因有效样本为 0 而证据不足 (含全部 trial 待人工评分);
-    2. 评测可信度: `invalid` trial 占比超过 `--eval-invalid-limit`。
+    三条独立的失败条件 (任一都构成不可放行, terminal summary 点名哪个门):
+    1. 绝对阈值门 (agent 表现): 修正后的实测 `pass@1` (分母已排除
+       invalid/pending) 低于阈值, 或因有效样本为 0 而证据不足 (含全 pending);
+    2. 评测可信度: `invalid` trial 占比超过 `--eval-invalid-limit`;
+    3. 基线相对门 (`--eval-baseline`): 与基线 run 比较判显著变差 / 不可比 /
+       不可判 (core.comparison.compare_baseline, 与 CLI run --baseline 同语义)。
     阈值判定在 pytest_runtestloop wrapper 的 finally 中递增 session.testsfailed
     (早于 _main 的退出码计算; terminal summary 阶段已无法影响退出码)。
     """
@@ -197,16 +211,22 @@ class SuiteGatePlugin:
         suite_path: str,
         threshold: float,
         invalid_ratio_limit: float = DEFAULT_INVALID_RATIO_LIMIT,
+        baseline_run_id: str | None = None,
     ):
         self.suite_path = suite_path
         self.threshold = threshold
         self.invalid_ratio_limit = invalid_ratio_limit
+        self.baseline_run_id = baseline_run_id
         self.suite_name: str | None = None
         self.result: RunResult | None = None
         self.error: str | None = None
         self.failed = False
         self.harness_failed = False
         self.insufficient = False
+        # 基线相对门状态 (未传 --eval-baseline 时全部保持 None/False/空)
+        self.baseline_comparison: BaselineComparison | None = None
+        self.baseline_failed = False
+        self.baseline_error: str | None = None
 
     @pytest.hookimpl(wrapper=True)
     def pytest_runtestloop(self, session):
@@ -230,7 +250,12 @@ class SuiteGatePlugin:
             ratio is not None and ratio > self.invalid_ratio_limit
         )
         self.insufficient = self.error is None and pass1 is None
-        if self.harness_failed or self.insufficient or pass1 < self.threshold:
+        if (
+            self.harness_failed
+            or self.insufficient
+            or pass1 < self.threshold
+            or self.baseline_failed
+        ):
             self.failed = True
             session.testsfailed += 1
 
@@ -240,7 +265,38 @@ class SuiteGatePlugin:
         suite = load_suite(self.suite_path)
         self.suite_name = suite.name
         runner = await build_eval_runner()
-        return await runner.run_suite(suite)
+        result = await runner.run_suite(suite)
+        if self.baseline_run_id is not None:
+            await self._compare_baseline(runner, result)
+        return result
+
+    async def _compare_baseline(self, runner, result: RunResult) -> None:
+        """基线相对门: 从同一 runner 的 storage 读基线 run, 复用同一比较语义。
+
+        基线缺失/存储不可读都是门禁失败 (宁可红不可哑), 与「装配失败静默
+        放行是 CI 事故」同一条纪律。
+        """
+        from agent_eval.core.comparison import compare_baseline
+
+        storage = getattr(runner, "storage", None)
+        getter = getattr(storage, "get_run", None)
+        if storage is None or getter is None:
+            self.baseline_error = (
+                f"eval runner storage does not support reading baseline run "
+                f"'{self.baseline_run_id}'"
+            )
+            self.baseline_failed = True
+            return
+        baseline = await getter(self.baseline_run_id)
+        if baseline is None:
+            self.baseline_error = (
+                f"baseline run '{self.baseline_run_id}' not found in the eval "
+                f"runner's storage — the gate refuses to pass on a missing baseline"
+            )
+            self.baseline_failed = True
+            return
+        self.baseline_comparison = compare_baseline(result, baseline)
+        self.baseline_failed = self.baseline_comparison.verdict in BASELINE_GATE_FAILURES
 
     def _summary(self):
         if self.result is None or self.result.summary is None:
@@ -329,6 +385,29 @@ class SuiteGatePlugin:
                     f"GATE PASSED: pass@1 {pass1:.4f} >= threshold {self.threshold:.4f}"
                 )
 
+        if self.baseline_run_id is not None:
+            # 基线相对门独立成块: 与绝对阈值门任一失败即失败, 输出点名是哪个门
+            terminalreporter.write_line("")
+            terminalreporter.write_line(
+                f"Baseline gate (--eval-baseline {self.baseline_run_id}):"
+            )
+            if self.baseline_error is not None:
+                terminalreporter.write_line(f"BASELINE GATE ERROR: {self.baseline_error}")
+            elif self.baseline_comparison is not None:
+                for line in format_baseline_report(self.baseline_comparison):
+                    terminalreporter.write_line(f"  {line}")
+                verdict = self.baseline_comparison.verdict
+                if self.baseline_failed:
+                    terminalreporter.write_line(
+                        f"BASELINE GATE FAILED ({verdict.value}) — relative regression "
+                        "gate did not pass (worse / not comparable / undecidable)"
+                    )
+                else:
+                    terminalreporter.write_line(
+                        f"BASELINE GATE PASSED ({verdict.value}) — no significant "
+                        "regression against the baseline"
+                    )
+
     def _extrapolated(self, k: int) -> bool:
         summary = self._summary()
         if summary is None:
@@ -388,6 +467,17 @@ def pytest_addoption(parser) -> None:
             f"默认 {DEFAULT_INVALID_RATIO_LIMIT})"
         ),
     )
+    group.addoption(
+        "--eval-baseline",
+        action="store",
+        default=None,
+        help=(
+            "基线 run ID (评测 runner storage 中已落盘): suite 评测完成后与其做基线"
+            "比较, 显著变差/不可比/不可判都置 session.testsfailed (宁可红不可哑); "
+            "terminal summary 打印基线比较结论。与 --eval-threshold 可并用, "
+            "任一门失败即失败且输出点名触发的是哪个门"
+        ),
+    )
 
 
 def pytest_configure(config) -> None:
@@ -398,5 +488,6 @@ def pytest_configure(config) -> None:
             suite_path,
             float(config.getoption("eval_threshold")),
             float(config.getoption("eval_invalid_limit")),
+            baseline_run_id=config.getoption("eval_baseline"),
         )
         config.pluginmanager.register(_gate_plugin)

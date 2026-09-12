@@ -21,6 +21,7 @@ eval-suite run <suite.yaml> [选项]
 | `--vocabulary NAME` | `otel-genai` | trace 属性词汇预设（可选值见接入指南 §3）；也读 `AEVAL_TRACE_VOCABULARY`，写错在装配期报错 |
 | `--db PATH` | `./aeval.db` | 结果 SQLite 路径；也读 `AEVAL_DB` |
 | `--invalid-limit RATIO` | `0.2` | 可接受的 `invalid` trial 占比上限（`0.0`–`1.0`），超过以退出码 3 结束 |
+| `--baseline RUN_ID` | 不启用 | 基线相对回归门：run 完成后与同库中该 run 比较（语义见下文「基线门」） |
 
 行为：加载校验 suite → 装配 trace 映射与 runner → 执行 → 打印汇总（统计口径版本 / pass@k 及其区间 / pass^k / 平均分与 `worst_of_n` / `valid`·`invalid`·`pending` 分母 / 失败任务清单）。开头回显 `Trace vocabulary: NAME  spec=…  mapping=…`，即这一轮数字是按哪套埋点约定读出来的。
 
@@ -29,7 +30,7 @@ eval-suite run <suite.yaml> [选项]
 | 码 | 含义 |
 |----|------|
 | 0 | 放行：无评测侧问题且无未通过任务 |
-| 1 | agent 表现：存在未通过任务（或 suite 加载失败） |
+| 1 | agent 表现：存在未通过任务，或基线门判显著变差 / 不可比 / 不可判（见下文「基线门」） |
 | 2 | 用法错误：runner 或 `--vocabulary` 未知等参数问题 |
 | 3 | **评测本身不可信**：`invalid` 占比超 `--invalid-limit`，或关键统计量为 `insufficient_data`（无有效 trial 进入分母） |
 
@@ -41,6 +42,29 @@ eval-suite run <suite.yaml> [选项]
 [project.entry-points."agent_eval.runners"]
 my-agent = "my_pkg.runner:create_runner"
 ```
+
+## 基线门 — `run --baseline` 与 pytest `--eval-baseline`
+
+基线门是**相对回归门**：本次结果与一个显式指定的基线 run 比较，判定复用 `compare` 的同一套语义（与 REST `POST /compare`、CLI `compare` 同源）。
+
+```bash
+eval-suite run <suite.yaml> --baseline <run_id> [--db PATH]
+pytest --eval-suite=suite.yaml --eval-baseline=<run_id>
+```
+
+判定对象是**套件实测 `pass@1` 的 95% 区间**（与绝对阈值门同一个量）：
+
+| 结论 | 条件 | `run --baseline` 退出码 |
+|------|------|------|
+| 显著变差 | 两区间不重叠且新值更低 | 非 0（1） |
+| 不显著 | 两区间重叠——差异落在噪声内，**不等于没有变化** | 0 |
+| 优于基线 | 两区间不重叠且新值更高 | 0 |
+| 不可比 | 统计口径版本或证据边界（含环境身份）不同，或一侧为缺记录的历史 run | 非 0（1）+ `not_comparable_reason` |
+| 不可判 | 一侧 `pass@1` 无实测区间（无有效样本 / 外推值） | 非 0（1）+ 原因 |
+
+不可比与不可判都以非零退出码显形（**宁可红不可哑**）：没法比较的基线门不许静默放行。输出包含两侧 `pass@1` 与 95% 区间、逐 task 的新旧对照（**诊断块**——标注方向与显著性，不参与门判定；门判套件级）。基线是显式声明：建议取同口径、同证据边界的新鲜 run，太老的基线会持续报不可比（有意行为）。`eval-suite power` 回答"要多少样本才够"。
+
+pytest 插件同语义：`--eval-baseline` 指向评测 runner storage 中的基线 run，显著变差 / 不可比 / 不可判 / 基线缺失都置 `session.testsfailed`；terminal summary 独立成块打印基线比较结论并点名 `BASELINE GATE FAILED/PASSED`。可与 `--eval-threshold` 并用——任一门失败即失败，输出区分触发的是哪个门。
 
 ## 门禁 — pytest 插件（CI 侧）
 
@@ -54,6 +78,7 @@ pytest --eval-suite=suite.yaml --eval-threshold=0.7 [--eval-invalid-limit=0.2]
 |------|------|------|
 | `pass@1` 低于 `--eval-threshold`，或有效样本为 0 | `GATE FAILED: pass@1 …` / `GATE FAILED (insufficient evidence)` | agent 表现结论（后者是证据不足，不是表现差） |
 | `invalid` trial 占比 > `--eval-invalid-limit` | `GATE FAILED (evaluation-side, not agent performance)` | 评测本身不可信，须先修 grader/judge 配置 |
+| 基线门触发（`--eval-baseline`）：显著变差 / 不可比 / 不可判 / 基线缺失 | `BASELINE GATE FAILED (...)` | 与基线相比显著变差，或没法比较（宁可红不可哑） |
 
 任一条成立都会置 `session.testsfailed`（会话退出码非 0）；suite 加载或 runner 装配失败同样判门禁失败——装配失败却静默放行是 CI 事故。判定量 `pass@1` 的分母已排除 `invalid` 与 `pending`。
 
@@ -100,6 +125,22 @@ eval-suite compare <run_a> <run_b> [--db PATH]
 - 显著性规则：95% 置信区间重叠 → `not significant (95% CI overlap)`，**不判方向**；区间缺失 → `significance undetermined`；只有口径一致且区间不重叠才允许结论
 - 值为 `insufficient_data` 时显示该文本，而不是 0.0000
 - `Regressions:` / `Improvements:` 只收录口径可比、区间不重叠且 |delta| > 0.1 的任务；为空时注明 `(no significant difference)` 或 `(runs not comparable)`
+
+## power — 样本量规划（功效分析）
+
+```bash
+eval-suite power --delta 0.03 [--p 0.7] [--db PATH]
+eval-suite power --delta 0.05 --from-run <run_id> [--db PATH]
+```
+
+回答"达到目标分辨率需要多少有效 trial"。两种问法：
+
+- `--delta δ`（0 < δ < 0.5，必填）：通过率 95% 区间半宽反解。基线 `--p` 缺省取 **0.5（最保守）**——真实 p 越极端区间越窄。
+- `--delta δ --from-run <run_id>`：从已落盘 run 取**实测** pass@1 作 p（Wilson 反解），并取实测分数标准差 σ 作双样本正态近似回答「分辨两版本分数差异 d = δ 需要 N」。
+
+输出固定包含：N、所用公式（Wilson 半宽反解 / `n ≈ 2·(z_{α/2}·σ/d)²`，z=1.960）、假设与局限声明（Wilson 区间非对称、正态近似在小样本/偏态下**偏乐观**——把 N 当下限并留余量）。
+
+退出码：0 正常；1 证据不足（`--from-run` 指向的 run 无有效 trial 时报 `insufficient evidence`，**不以 0/1 代算**）或 run 不存在；2 用法错误（δ 越界）。
 
 ## serve — 独立 API 服务
 

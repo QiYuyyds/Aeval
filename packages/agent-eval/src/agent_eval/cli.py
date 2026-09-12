@@ -3,7 +3,9 @@ eval-suite — the Aeval command line.
 
 Commands:
     run        Execute a suite (default runner: built-in MockAgentRunner).
-               Exit 0 all passed / 1 failed tasks / 3 evaluation untrustworthy
+               Exit 0 all passed / 1 failed tasks or baseline regression /
+               3 evaluation untrustworthy. --baseline adds a relative
+               regression gate against a stored run
     validate   Validate a suite YAML without running it
     list       List runs or suites from the storage DB
     show       Show one run's details (--task drills into a single task);
@@ -12,6 +14,8 @@ Commands:
     compare    A/B compare two runs; overlapping 95% intervals read as
                "not significant" with no directional verdict, and differing
                statistics versions or evidence boundaries read as not comparable
+    power      Sample-size planning: trials needed for a target resolution
+               (--delta with an assumed or measured baseline pass rate)
     serve      Serve the standalone API (/v1) via uvicorn
 
 Runner selection (run): --runner option > AEVAL_RUNNER env var > "mock".
@@ -396,10 +400,20 @@ def run(
         "--verbose",
         help="展开诊断指标块 (默认折叠: 诊断量不进分母, 一行提示)",
     ),
+    baseline: str | None = typer.Option(
+        None,
+        "--baseline",
+        help=(
+            "基线 run ID (同一结果库中已落盘的 run): 本次 run 完成后与其做基线比较。"
+            "显著变差 / 不可比 / 证据不足都以非零退出码结束 (宁可红不可哑); "
+            "区间重叠或优于基线 → 退出码 0"
+        ),
+    ),
 ) -> None:
     """加载并执行 suite, 打印汇总。
 
-    退出码: 0 全通过; 1 存在未通过任务; 3 评测本身不可信 (invalid 超阈或
+    退出码: 0 全通过且基线门 (如启用) 未触发; 1 存在未通过任务或基线门判
+    显著变差/不可比/不可判; 2 用法错误; 3 评测本身不可信 (invalid 超阈或
     关键统计量为 insufficient_data)。
     """
     from agent_eval.core.runner import EvalRunner
@@ -491,6 +505,31 @@ def run(
     if summary is None:
         raise typer.Exit(code=1)
 
+    # 基线相对门 (opt-in): 与绝对阈值门同量 (套件实测 pass@1), 同一比较语义
+    # (core.comparison.compare_baseline — 与 API compare / pytest 插件三处同源)。
+    # 诊断块先行打印; 门判定在可信度与任务失败之后 (失败原因要能叠加呈现)。
+    baseline_gate_failed = False
+    if baseline is not None:
+        from agent_eval.core.comparison import (
+            BASELINE_GATE_FAILURES,
+            compare_baseline,
+            format_baseline_report,
+        )
+
+        baseline_run = asyncio.run(_get_run(storage, baseline))
+        if baseline_run is None:
+            typer.echo(
+                f"error: baseline run '{baseline}' not found in {_db_path(db)}", err=True
+            )
+            raise typer.Exit(code=2)
+
+        comparison = compare_baseline(run_result, baseline_run)
+        typer.echo("")
+        for line in format_baseline_report(comparison):
+            typer.echo(line)
+        if comparison.verdict in BASELINE_GATE_FAILURES:
+            baseline_gate_failed = True
+
     # 评测可信度条件先于 agent 表现结论 (不可信的分数不参与放行判定)
     reliability_problems: list[str] = []
     if summary.total_trials:
@@ -522,6 +561,10 @@ def run(
         raise typer.Exit(code=3)
 
     if summary.failures:
+        raise typer.Exit(code=1)
+
+    if baseline_gate_failed:
+        # 显著变差 / 不可比 / 不可判: 基线门不放行 (宁可红不可哑)
         raise typer.Exit(code=1)
 
 
@@ -853,6 +896,151 @@ def _cmp_verdict(entry: dict, comparison: dict) -> str:
         return "not significant (95% CI overlap)"
     extrap = " [extrapolated]" if entry.get("extrapolated") else ""
     return f"significant{extrap}"
+
+
+# ─── power ───────────────────────────────────────────────────────────────────
+
+
+def _power_line(label: str, value: str) -> str:
+    return f"  {label:<44} {value}"
+
+
+@app.command()
+def power(
+    delta: float = typer.Option(
+        ...,
+        "--delta",
+        help=(
+            "目标分辨率: 通过率 95% 区间的半宽 δ (0 < δ < 0.5)。与 --from-run 并用时"
+            "兼作两版本分数差异 d"
+        ),
+    ),
+    p: float | None = typer.Option(
+        None,
+        "--p",
+        min=0.0,
+        max=1.0,
+        help="假设的基线通过率 (默认 0.5, 最保守); --from-run 存在时被实测值取代",
+    ),
+    from_run: str | None = typer.Option(
+        None,
+        "--from-run",
+        help="从已落盘 run 取实测 pass@1 (p) 与分数标准差 (σ) 作为基线",
+    ),
+    db: str | None = typer.Option(
+        None, "--db", envvar="AEVAL_DB", help="SQLite 结果库路径 (默认 ./aeval.db)"
+    ),
+) -> None:
+    """样本量规划 (功效分析): 达到目标分辨率需要多少有效 trial。
+
+    两种问法: --delta (假设基线 p, Wilson 区间宽度反解) 与
+    --delta + --from-run (实测基线: p 走 Wilson 反解, 分数 σ 走双样本正态
+    近似回答「分辨差异 d 需要 N」)。全部闭式公式, 输出自陈公式、假设与局限。
+    退出码: 0 正常; 1 证据不足 (run 无有效样本, 不以 0/1 代算); 2 用法错误。
+    """
+    from agent_eval.core.metrics import normal_two_sample_size, wilson_sample_size
+
+    if not 0.0 < delta < 0.5:
+        typer.echo(f"error: --delta must be in (0, 0.5), got {delta}", err=True)
+        raise typer.Exit(code=2)
+
+    z = _z_score_display()
+
+    typer.echo("Power analysis (sample size planning)")
+    typer.echo(f"  Resolution: +/-{delta:.1%} half-width (delta)")
+
+    measured_sigma: float | None = None
+    sigma_note: str | None = None
+    if from_run is not None:
+        storage = _build_storage(db)
+        run = asyncio.run(_get_run(storage, from_run))
+        if run is None:
+            typer.echo(
+                f"error: run '{from_run}' not found in {_db_path(db)}", err=True
+            )
+            raise typer.Exit(code=1)
+        summary = run.summary
+        measured_p = _pass1(summary) if summary else None
+        if measured_p is None:
+            typer.echo(
+                f"error: run '{from_run}' has no valid trials (pass@1 is "
+                f"{INSUFFICIENT_LABEL}) — insufficient evidence for power analysis; "
+                "refusing to plan with a substituted 0 or 1",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        dist = summary.score_distribution if summary else None
+        measured_sigma = dist.std_dev if dist is not None else None
+        valid = summary.valid_trials if summary else None
+        typer.echo(
+            f"  Run: {run.run_id}  status={run.status}  "
+            f"valid={valid if valid is not None else 'unknown'}"
+        )
+        typer.echo(
+            f"  Measured baseline: pass@1 = {measured_p:.1%}  (p taken from the run)"
+        )
+        baseline_p = measured_p
+        if measured_sigma is None:
+            sigma_note = (
+                "insufficient_data (score axis needs >= 2 valid trials; "
+                "historical runs may not have recorded one)"
+            )
+    else:
+        baseline_p = p if p is not None else 0.5
+        typer.echo(
+            f"  Baseline: p = {baseline_p:.3f} (assumed; "
+            + (
+                "given via --p"
+                if p is not None
+                else "0.5 is the most conservative choice"
+            )
+            + ")"
+        )
+
+    n_rate = wilson_sample_size(baseline_p, delta)
+    typer.echo(_power_line("Required trials (rate +/-delta):", f"N = {n_rate}"))
+    typer.echo(
+        f"  Formula (rate): Wilson 95% interval half-width w(p, N) <= delta "
+        f"(z = {z} two-sided)"
+    )
+
+    if from_run is not None:
+        if measured_sigma is not None:
+            n_diff = normal_two_sample_size(delta, measured_sigma)
+            typer.echo(
+                f"  Measured score spread: sigma = {measured_sigma:.4f} "
+                "(trial-to-trial SD of the weighted score)"
+            )
+            typer.echo(
+                _power_line(
+                    f"Required trials per version (difference d = {delta:g}):",
+                    f"N = {n_diff}",
+                )
+            )
+            typer.echo(
+                f"  Formula (difference): n ~= 2 * (z_(alpha/2) * sigma / d)^2, "
+                f"alpha = 0.05 (z = {z})"
+            )
+        else:
+            typer.echo(f"  Measured score spread: {sigma_note}")
+            typer.echo(
+                "  Formula (difference): skipped — no measured sigma to plan with"
+            )
+
+    typer.echo(
+        "  Limitation (rate): Wilson intervals are asymmetric — '+/-delta' is read "
+        "as the half-width; the width depends on the true p, plan with margin"
+    )
+    typer.echo(
+        "  Limitation (difference): the normal approximation is optimistic for "
+        "small or skewed samples — treat N as a floor and keep margin"
+    )
+
+
+def _z_score_display() -> str:
+    from agent_eval.core.metrics import Z_SCORE_AT_DEFAULT_CONFIDENCE
+
+    return f"{Z_SCORE_AT_DEFAULT_CONFIDENCE:.3f}"
 
 
 # ─── extensions ──────────────────────────────────────────────────────────

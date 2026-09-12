@@ -548,3 +548,63 @@ eval-suite run my-suite.yaml   # 套件直接引用 name: my_gate
 - **惰性导入**：只在套件引用某名字时才导入其宿主包；导入异常降级为「该扩展点不可用」告警，装配继续，引用到它按未注册处理（`unknown_grader`，错误信息列出可用名字并注明曾尝试加载的外部包）；
 - **同名冲突显式报错**：两个包注册同一名字 → 装配期 `ExtensionConflictError` 并列出两个来源包，不静默覆盖；
 - 列表命令：`eval-suite extensions`；REST 侧 `/meta` 的 `capabilities.extensions` 与它同源。
+
+## 14. 回放线上流量（trace → 任务 → 套件 → 定时回归）
+
+生产环境的真实流量是现成的评测素材。Aeval 把「回放线上流量」做成一条
+**文档化的离线通路**——每一步的输入输出都显式，框架不引入任何在线服务，
+定时回归交给外部调度（cron / CI）。可跑的最小示例见
+[examples/trace-replay](../examples/trace-replay/)。
+
+### 14.1 trace 导出（输入：线上系统；输出：trace 归档）
+
+从被评系统接入的观测后端（Phoenix / OTLP collector / 宿主自建）导出 trace：
+每条 trace 是一组 spans（`name` / `attributes` / `start_time` / `end_time` /
+`status`）。框架对导出格式只要求一件事——能以 `TraceProvider` 的两个方法
+表达：`get_trace_ids(filters, limit)` 列候选，`get_spans(trace_id)` 取单条。
+span 属性名属于哪套公共约定（otel-genai / openinference）或宿主私有词表，
+沿用 [§3 的翻译表](#3-traceprovider-与属性翻译表可选)处理。
+
+**边界**：框架不做 trace 采集与导出（那是各家后端的事），只消费导出结果。
+
+### 14.2 挖掘成任务（输入：trace 归档；输出：带溯源的评测条目）
+
+`TraceMiner(trace_provider).mine(strategy, limit)` 按三种首版策略筛选：
+
+| 策略 | 挑什么 | 语义 |
+|------|--------|------|
+| `failed_tasks` | 含 ERROR 状态或 error 属性的 trace | 线上出错的那部分流量 |
+| `long_running` | 时长超过 P90 × 倍数的 trace | 慢调用（倍数可配，默认 2.0） |
+| `diverse_sampling` | 按 trace_id 哈希均匀采样 | 不偏向失败/慢的横截面 |
+
+每条被选中的 trace 从**根 span 的 input 属性**（`input.value` 等惯例键）提取
+用户输入作为任务 prompt；读不到输入的 trace 进 `skipped` 明细（**不猜
+prompt**）。产出的 `EvalDatasetItem` 带 `source_type=trace_mining`、
+`source_ref=trace_id` 溯源——评测条目永远能追回它出自哪条线上 trace。
+
+### 14.3 人工补判据与套件化（输入：挖掘条目；输出：可执行 suite）
+
+挖掘**只产出 prompt 与溯源，不产出判据**——「这条 trace 该怎么判」是人的
+决定。人工评审挖掘结果后给条目补 graders（或先跑 `dataset quality` 检查
+缺口），随后 `EvalDataset.to_suite()` 套件化：复用套件校验器，非法条目
+拒绝转换；数据集 id / 版本写进 suite 元数据，run 结果可关联回挖掘批次。
+
+### 14.4 执行与定时回归（输入：suite；输出：run + 门禁结论）
+
+```bash
+# 首轮: 建基线
+eval-suite run replay-suite.yaml            # 落库, 记下 run_id
+
+# 之后: 外部调度 (cron / CI) 周期性执行, 与基线比较
+eval-suite run replay-suite.yaml --baseline <基线 run_id>
+```
+
+`--baseline` 是**基线相对回归门**：本轮与基线 run 的实测 `pass@1` 95% 区间
+不重叠且方向向下才判显著变差（退出码非 0）；两 run 统计口径或证据边界不同
+（含环境身份）则判不可比并给 `not_comparable_reason`——宁可红不可哑，
+静默放行会让边界漂移悄悄累积。逐 task 升降以诊断输出呈现，不参与门判定。
+基线建议取**同边界的新鲜 run**：太老的基线（口径/边界已变）会持续报不可比，
+那是有意行为——边界漂移应当被看见。
+
+**边界**：定时触发、告警通知、结果看板都不在框架内——调度是外部 CI 的
+职责，框架只负责一次 run 与一次门判定。

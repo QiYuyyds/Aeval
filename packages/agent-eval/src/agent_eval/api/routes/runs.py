@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from agent_eval.api.events import run_event_bus
+from agent_eval.core.comparison import runs_comparable
 from agent_eval.core.metrics import classify_trial, trial_invalid_reason
 from agent_eval.core.types import STATISTICS_VERSION, TrialVerdict
 
@@ -561,13 +562,12 @@ def _build_comparison(run_a, run_b) -> dict[str, Any]:
     summary_a = run_a.summary
     summary_b = run_b.summary
 
+    # 可比性前置与 CLI / 基线门同源 (core.comparison.runs_comparable)
+    comparable, not_comparable_reason = runs_comparable(run_a, run_b)
     version_a = getattr(run_a, "statistics_version", None)
     version_b = getattr(run_b, "statistics_version", None)
     evidence_a = getattr(run_a, "evidence", None)
     evidence_b = getattr(run_b, "evidence", None)
-    same_caliber = version_a is not None and version_a == version_b
-    same_boundary, boundary_reason = _compare_evidence_boundaries(evidence_a, evidence_b)
-    comparable = same_caliber and same_boundary
 
     all_k_values: set[int] = set()
     for summary in (summary_a, summary_b):
@@ -691,40 +691,8 @@ def _build_comparison(run_a, run_b) -> dict[str, Any]:
             "b": evidence_b.model_dump() if evidence_b else None,
         },
         "comparable": comparable,
-        "not_comparable_reason": _not_comparable_reason(
-            comparable, same_caliber, version_a, version_b, boundary_reason
-        ),
+        "not_comparable_reason": not_comparable_reason,
     }
-
-
-def _compare_evidence_boundaries(
-    evidence_a: Any, evidence_b: Any
-) -> tuple[bool, str | None]:
-    """两个 run 的证据边界是否一致 (缺记录即无法判定可比)。"""
-    if evidence_a is None and evidence_b is None:
-        return False, "两个 run 均未记录证据采集边界 (历史 run), 无法判定可比性"
-    if evidence_a is None or evidence_b is None:
-        missing = "a" if evidence_a is None else "b"
-        return False, f"run_{missing} 未记录证据采集边界 (历史 run), 无法判定可比性"
-    return evidence_a.compare_with(evidence_b)
-
-
-def _not_comparable_reason(
-    comparable: bool,
-    same_caliber: bool,
-    version_a: str | None,
-    version_b: str | None,
-    boundary_reason: str | None,
-) -> str | None:
-    if comparable:
-        return None
-    if not same_caliber:
-        return (
-            "两个 run 的统计口径版本不同"
-            if version_a is not None and version_b is not None
-            else "至少一个 run 未记录统计口径版本 (历史 run), 无法判定可比性"
-        )
-    return boundary_reason or "两个 run 的证据采集边界不同"
 
 
 def _delta(a: float | None, b: float | None) -> float | None:

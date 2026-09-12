@@ -24,6 +24,13 @@ Aeval 的版本语义变更记录。格式遵循 [Keep a Changelog](https://keep
 - **环境初始态与身份**：task 可声明环境 fixture（经既有 `setup(task)` 句柄读取）；`EvidenceBoundary` 记录环境标识与版本，跨 run 比较在环境身份不同时报 `not_comparable_reason`，历史行读回为「未记录」。
 - **可重放脚本**：用户侧输入序列（首轮 + 话术 + 事件 + 人工介入）随证据落盘，库层重评分被评系统调用次数为零。
 
+### 新增（变更⑥ add-baseline-gate-and-power-analysis，随下一次 minor 发布）
+
+- **基线相对回归门**：`eval-suite run --baseline <run_id>` 与 pytest 插件 `--eval-baseline <run_id>`。复用 compare 的同源可比判定（统计口径一致且证据边界一致，含环境身份），以套件实测 `pass@1` 的 95% 区间判门：区间不重叠且方向向下才算「显著变差」（退出码非 0）；不可比 / 不可判同样失败并给原因（宁可红不可哑）；区间重叠或优于基线则放行并如实呈现两区间。逐 task 升降以诊断块呈现，不参与门判定。可比性判定从 API 路由下沉核心层（`core/comparison.py`），CLI / API / 插件三处同源。
+- **样本量规划（`eval-suite power`）**：`--delta` 问法（基线 `--p` 缺省 0.5 最保守，Wilson 95% 区间半宽反解）与 `--delta --from-run <run_id>` 问法（实测 p 走 Wilson 反解，实测分数 σ 走双样本正态近似回答「分辨差异 d 需要 N」）。全闭式公式零新依赖；输出自陈公式、假设与「正态近似偏乐观」局限；run 无有效样本时报证据不足退出非零，不以 0/1 代算。
+- **生产 trace 回放通路（文档 + 离线示例）**：[接入指南 §14](docs/integration-guide.md) 写明 trace 导出 → `trace_mining` 建任务 → 人工补判据 → 套件化 → `eval-suite run --baseline` 定时回归的全通路与边界（不做在线服务）；`examples/trace-replay/` 提供全程离线的最小演示。
+- 不传新参数时 `run` / pytest 插件行为与 0.3.x 逐字节一致；`statistics_version` 不变（功效分析是报告量与门禁行为，不改分母口径）。
+
 ## [0.2.0] — 2026-09-06
 
 ### 变更
