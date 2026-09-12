@@ -45,6 +45,13 @@ from agent_eval.trace.mapping import (
 DEFAULT_DB = "./aeval.db"
 RUNNERS_ENTRY_POINT_GROUP = "agent_eval.runners"
 
+# ⑤: 扩展点 kind → 描述 (CLI 清单与装配共用; 发现逻辑在 core/discovery.py)
+_EXTENSION_KIND_LABELS = {
+    "graders": "自定义评分器",
+    "environments": "环境管理器",
+    "simulators": "用户模拟器",
+}
+
 app = typer.Typer(
     help="Aeval — agent evaluation framework (https://github.com/QiYuyyds/Aeval)",
     no_args_is_help=True,
@@ -193,6 +200,35 @@ def _build_storage(db: str | None):
     from agent_eval.storage.sqlite import SqliteStorage
 
     return SqliteStorage(_db_path(db))
+
+
+def _discover_or_exit():
+    """发现扩展点; 同名冲突直接退出 (不静默覆盖, spec: extension-contracts)。"""
+    from agent_eval.core.discovery import ExtensionConflictError, discover_extensions
+
+    try:
+        return discover_extensions()
+    except ExtensionConflictError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(code=2) from None
+
+
+def _resolve_environment(suite, registry):
+    """按套件声明的环境名装配环境管理器 (惰性导入, 引用不到即报错)。"""
+    if not suite.environment:
+        return None
+    environment, failure = registry.resolve("environments", suite.environment)
+    if environment is None:
+        available = registry.names("environments") or ["(无)"]
+        detail = f" (导入失败: {failure})" if failure else ""
+        typer.echo(
+            f"error: suite.environment '{suite.environment}' 未注册{detail}; "
+            f"可用环境: {available}。环境经 'agent_eval.environments' "
+            "entry-point 组注册",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    return environment
 
 
 def _trace_provider_for(agent_runner):
@@ -400,6 +436,8 @@ def run(
 
     agent_runner = _resolve_agent_runner(runner)
     storage = _build_storage(db)
+    registry = _discover_or_exit()
+    environment = _resolve_environment(suite, registry)
 
     # 内置指标注册表同源装配 (与 metric grader / 诊断指标同一注入约定):
     # llm_fn 未配置时被引用的 LLM 指标返回明确配置错误, 不 crash run
@@ -411,6 +449,8 @@ def run(
         storage=storage,
         trace_mapping=trace_mapping,
         metrics_registry=build_default_metrics_registry(),
+        environment=environment,
+        extensions=registry,
         **({"concurrency": concurrency} if concurrency else {}),
     )
 
@@ -813,6 +853,45 @@ def _cmp_verdict(entry: dict, comparison: dict) -> str:
         return "not significant (95% CI overlap)"
     extrap = " [extrapolated]" if entry.get("extrapolated") else ""
     return f"significant{extrap}"
+
+
+# ─── extensions ──────────────────────────────────────────────────────────
+
+
+@app.command()
+def extensions() -> None:
+    """列出本次运行真正可用的扩展点及其来源 (内置的与被发现的)。
+
+    这份清单与 REST /meta 能力清单读同一份发现结果 (spec: cli)。
+    """
+    from agent_eval.graders import DEFAULT_GRADERS
+
+    registry = _discover_or_exit()
+    catalog = registry.catalog()
+
+    typer.echo("Built-in graders:")
+    for grader in DEFAULT_GRADERS:
+        typer.echo(f"  - {grader.name} (built-in)")
+
+    discovered_any = False
+    for kind, label in _EXTENSION_KIND_LABELS.items():
+        entries = catalog.get(kind, [])
+        typer.echo("")
+        typer.echo(f"Discovered {kind} ({label}):")
+        if not entries:
+            typer.echo("  (none)")
+            continue
+        discovered_any = True
+        for entry in entries:
+            typer.echo(f"  - {entry['name']} (from {entry['source']})")
+
+    if not discovered_any:
+        typer.echo("")
+        typer.echo(
+            "No discovered extensions. Publish packages with entry-point groups "
+            "agent_eval.graders / agent_eval.environments / agent_eval.simulators "
+            "to make them available here (see docs/integration-guide.md)."
+        )
 
 
 # ─── serve ───────────────────────────────────────────────────────────────────

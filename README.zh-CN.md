@@ -13,9 +13,10 @@
 - **统计上严谨的聚合** — `pass@k`（能力）与 `pass^k`（可靠性）为有限样本无偏组合估计，且只在 **valid trial** 上计算；`k > n` 一律是二项外推并显式标注；每个通过率附 Wilson 95% 区间，每个分数附 bootstrap 区间与均值/σ/`worst_of_n`，过程指标附 p50/p95。判分器崩溃、判据未配置、judge 不可用等评测侧故障判为 `invalid` 且不进分母，不再被折成 agent 的失败。
 - **证据可追溯，缺了就说是缺** — 一次 trial 交付的每一条观测都标明**是谁、在什么时候观测到的**（`observed_by: harness | runner | subject`），因此判据可以被要求「只认评测侧独立取证」，被评方自报的内容不能单独把 trial 判成通过。span 先经一张**版本钉住的 OTel GenAI 翻译表**归一化成词汇无关的标准观测，宿主的私有属性名只是运行时配置而非框架常量；每条结论自陈看到了哪些证据、哪些没看到及原因，读不到的字段是「缺失」而**不是 0**。trial 因何结束由框架判定（超时 / 步数·token·成本触顶 / 报错 / 取消各归其位，预算触顶计未通过但单列，超时走 invalid 不占分母），token 四分解与 `cost_usd` 作为与通过率**并列**的第二轴呈现，单价表取自外部配置。
 - **采集与评分是两个相** — 证据在判分之前就按 trial 独立归档，因此对既有 run 重新评分**不会再次调用被评系统**：修好判分器、换掉 judge、收紧证据声明，都能拿同一批字节重判。每次判定都带着产生它的口径追加落盘（判分实现版本、属性翻译表与规范修订、判定模型、时间）并由 `current` 指针指明生效结论 —— **历史结论永不被覆盖**，于是「judge 换代让多少 trial 翻判」是个真能回答的问题。
-- **全组件可插拔** — AgentRunner / TraceProvider / Storage / Environment / Grader 都是小型协议，实现即接入；属性翻译表、脱敏钩子与单价表同样可替换（脱敏钩子为整体替换，不叠加默认处理）。
+- **全组件可插拔** — AgentRunner / TraceProvider / Storage / Environment / Grader / UserSimulator 都是小型协议，实现即接入；属性翻译表、脱敏钩子与单价表同样可替换（脱敏钩子为整体替换，不叠加默认处理）。
+- **多轮会话、运行中事件与用户模拟** — task 可声明 `conversation.turns`（预写话术，零模型调用）或 `conversation.goal`（目标驱动模拟器，复用既有 `LLMFn` 注入，可设 `max_turns` 安全阀）；trial 进行中可注入环境事件与人工介入（会话句柄上的 `inject_event` / `human_message`，或声明式 `conversation.events`）；判据可用新取值 `judgment_moment: after_last_event` 只看「最后一个注入事件之后」的状态；适配器未消费完声明轮次即返回 → invalid 并给配置侧原因；用户侧输入序列（首轮 + 模拟话术 + 注入事件 + 人工介入）随 trial 证据落盘成可重放脚本。一次多轮 trial 仍是**一次** `run()` 调用、**一条**分母记录 —— 轮数永不进通过率。第三方包经 entry-point 组（`agent_eval.graders` / `agent_eval.environments` / `agent_eval.simulators`）发布的自定义判据、环境与模拟器会被惰性发现：同名冲突显式报错，`eval-suite extensions` 与 `/meta` 读同一份注册结果。
 - **REST API 与 SSE** — 可挂载进任意 FastAPI 应用，也可独立服务（`/v1` 前缀），支持运行事件流。
-- **CLI** — `eval-suite run / validate / list / show / compare / serve`。
+- **CLI** — `eval-suite run / validate / list / show / compare / extensions / serve`。
 - **数据集与 LLM 指标** — 从 trace 构建数据集、回填套件，并用 RAG 质量指标（answer relevancy / faithfulness / context recall·precision）给输出打分。
 - **证据感知指标与跨评分者一致性** — 指标经证据感知的 `MeasurementContext` 测量：声明自己消费的通道（transcript / steps / harness·subject 状态），未声明的读不到，交付的每条观测带来源分级与采集时刻；声明轨迹通道的 judge 能看到完整轨迹；轨迹类指标默认仅诊断（显式升格前不进任何分母）；硬性安全判据可声明为乘性**门**，失败按乘子塌缩总分而不是被平均稀释；同一判据配置两个独立 judge 即可报告 Cohen's κ / Krippendorff's α，与单评分者多采样的自一致明确分开呈现。
 

@@ -34,11 +34,14 @@ from agent_eval.core.contract import (
     ExternalDependencyError,
     Grader,
     ProbeFn,
+    SimulatorReply,
     Storage,
     TraceProvider,
     TransientError,
     TrialSession,
+    UserSimulator,
 )
+from agent_eval.core.discovery import ExtensionRegistry
 from agent_eval.core.metrics import (
     ProcessMetrics,
     aggregate_metrics,
@@ -62,10 +65,12 @@ from agent_eval.core.metrics import (
 )
 from agent_eval.core.pricing import PRICE_TABLE_NOT_CONFIGURED, PriceTable
 from agent_eval.core.redaction import HashingEvidenceRedactor, describe_redactor
+from agent_eval.core.simulator import GoalDrivenUserSimulator, ScriptedUserSimulator
 from agent_eval.core.types import (
     DEFAULT_BOOTSTRAP_ROUNDS,
     DEFAULT_CONFIDENCE_LEVEL,
     MIN_VALID_TRIALS_FOR_SATURATION,
+    NO_ENVIRONMENT,
     STATISTICS_VERSION,
     AgreementReport,
     CaptureDecision,
@@ -143,6 +148,22 @@ _GRADING_OWNED_INVALID_REASONS = frozenset(
 # 呈现用的视图 (trial.transcript / trial.outcome) 不丢任何一级 —— 分级约束的是
 # 「谁能据此判通过」, 不是「报告里能看见什么」
 _ALL_LEVELS = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
+
+
+# ─── Unavailable simulator (引用未注册模拟器时的降级实现) ───────────────────
+
+
+class _UnavailableSimulator:
+    """永远返回不可用的模拟器: 会话即刻给带原因的不可用结论, 不崩溃。"""
+
+    name = "unavailable"
+    implementation_version = "1"
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    async def next_message(self, context) -> SimulatorReply:  # noqa: ANN001 — 内部使用
+        return SimulatorReply(unavailable_reason=self.reason)
 
 
 def _evidence_mix(trials: list[TrialResult]) -> dict[str, int]:
@@ -289,6 +310,7 @@ class EvalRunner:
         trace_mapping: AttributeMapping | None = None,
         price_table: PriceTable | Mapping[str, Any] | None = None,
         redactor: Any | None = None,
+        extensions: ExtensionRegistry | None = None,
     ):
         """
         Args:
@@ -320,6 +342,8 @@ class EvalRunner:
                 一律报不可计算, 框架不内置默认价目
             redactor: 工具入参/结果采集开启时强制应用的脱敏处理;
                 None = 默认摘要实现
+            extensions: 扩展点发现注册表 (⑤); None = 不从 entry point 发现。
+                引用未注册名字时, 失败信息会列出内置 + 已发现的名字
         """
         self.agent_runner = agent_runner
         self.trace_provider = trace_provider or PhoenixProvider()
@@ -346,6 +370,7 @@ class EvalRunner:
         self.trace_mapping = trace_mapping or default_mapping()
         self.price_table = _coerce_price_table(price_table)
         self.redactor = redactor or HashingEvidenceRedactor()
+        self.extensions = extensions
 
         # 注册 grader: 内置 + 自定义 (自定义覆盖同名)
         self._graders: dict[str, Grader] = {}
@@ -681,9 +706,10 @@ class EvalRunner:
         suite: EvalSuite,
         unrecognized: set[str],
     ) -> EvidenceBoundary:
-        """本次 run 的证据采集边界: 采集声明 + 翻译口径 + 脱敏处理身份。"""
+        """本次 run 的证据采集边界: 采集声明 + 翻译口径 + 脱敏处理身份 + 环境身份。"""
         identifier, version = describe_redactor(self.redactor)
         per_task = {task.id: suite.resolved_capture(task) for task in suite.tasks}
+        env_identity, env_version = self._environment_identity()
         return EvidenceBoundary(
             capture_tool_arguments=any(d.tool_arguments for d in per_task.values()),
             capture_model_content=any(d.model_content for d in per_task.values()),
@@ -699,8 +725,26 @@ class EvalRunner:
             mapping_version=self.trace_mapping.version,
             redactor_identifier=identifier,
             redactor_version=version,
+            environment_identity=env_identity,
+            environment_version=env_version,
             unrecognized_attributes=sorted(unrecognized),
         )
+
+    def _environment_identity(self) -> tuple[str | None, str | None]:
+        """本次运行的环境身份 (标识, 版本)。
+
+        - 无环境参与: 显式记 ``'none'`` (哨兵值), 与「历史 run 未记录」(None)
+          严格区分 —— 两个 'none' 可比, 一边 None 一边有记录不可比;
+        - 有环境: 优先读环境实现自报的 ``environment_id`` / ``environment_version``
+          属性 (可选, 协议签名不变), 缺属性退回类名。
+        """
+        if self.environment is None:
+            return NO_ENVIRONMENT, None
+        identity = getattr(self.environment, "environment_id", None) or (
+            f"{type(self.environment).__module__}.{type(self.environment).__name__}"
+        )
+        version = getattr(self.environment, "environment_version", None)
+        return str(identity), (str(version) if version is not None else None)
 
     # ── Task Execution ───────────────────────────────────────────────────
 
@@ -809,7 +853,7 @@ class EvalRunner:
         run_id: str,
         capture: CaptureDecision,
     ) -> tuple[TrialResult, bool]:
-        """准备环境 → 运行被评方 (运行中可探针) → 结束前取证 → 停止。
+        """准备环境 → 运行被评方 (运行中可探针、可取下一轮) → 结束前取证 → 停止。
 
         Returns:
             (trial, 是否进入评分) —— 每条退出路径都带着当时已采到的证据回来。
@@ -819,6 +863,8 @@ class EvalRunner:
             await self.environment.setup(task)
 
         start_time = time.time() * 1000
+        cancel_before = bool(self._cancel_flags.get(run_id, False))
+        simulator = self._build_simulator(task)
         session = TrialSession(
             probe=self._probe_callable(),
             deadline_ms=(
@@ -827,6 +873,9 @@ class EvalRunner:
                 else None
             ),
             cancelled=lambda: bool(self._cancel_flags.get(run_id, False)),
+            simulator=simulator,
+            conversation=task.conversation,
+            first_user_message=task.prompt if simulator is not None else None,
         )
         evidence = TrialEvidence(capture=capture)
         extraction = ProcessMetrics()
@@ -906,6 +955,28 @@ class EvalRunner:
 
             evidence = self._absorb(returned, session, capture=capture)
 
+            # 会话边界核对 (spec: orchestration —— 声明轮数未消费完即会话结束:
+            # 配置/适配器故障, 绝不按已发生轮次给出看似完整的通过结论)
+            boundary = self._conversation_boundary(task, session, run_id, cancel_before)
+            if boundary is not None:
+                elapsed = time.time() * 1000 - start_time
+                verdict, reason, error, termination = boundary
+                return (
+                    self._phase_trial(
+                        index,
+                        evidence=evidence,
+                        extraction=extraction,
+                        elapsed=elapsed,
+                        success=False,
+                        verdict=verdict,
+                        invalid_reason=reason,
+                        termination=termination,
+                        error=error,
+                        session=session,
+                    ),
+                    False,
+                )
+
             # trace 是适配层交付的观测: 词汇差异只在这条边界上解决一次
             spans, status, detail = await self._fetch_spans(evidence.trace_id)
             evidence.source_spans = spans
@@ -927,7 +998,8 @@ class EvalRunner:
             metrics = {**extraction.metrics, "latency_ms": elapsed}
             gaps = list(extraction.gaps)
 
-            # 预算判定 (触顶即停止该 trial, 不再花评分成本)
+            # 预算判定 (触顶即停止该 trial, 不再花评分成本); 预算在会话内
+            # 跨轮累计 —— 多轮会话仍是一次 run() 调用, 用量自然汇总
             breach = self._first_budget_breach(task, observations, metrics, gaps)
             trial = self._phase_trial(
                 index,
@@ -940,6 +1012,7 @@ class EvalRunner:
                 termination=breach or TerminationReason.AGENT_COMPLETED,
                 metrics=metrics,
                 gaps=gaps,
+                session=session,
             )
             if breach is not None:
                 trial.error = (
@@ -1036,6 +1109,88 @@ class EvalRunner:
         evidence.capture = capture
         return evidence
 
+    def _conversation_boundary(
+        self,
+        task: EvalTask,
+        session: TrialSession,
+        run_id: str,
+        cancel_before: bool,
+    ) -> tuple[TrialVerdict, InvalidReason, str, TerminationReason] | None:
+        """会话结束后核对声明轮次是否被消费完 / 模拟器是否不可用。
+
+        返回 None = 会话完整, 继续正常评分。适配器未按会话行事 (早退、忽略
+        会话维度) 判 invalid 并点名适配器与消费到第几轮; 取消在会话中生效
+        则带证据落盘但不进分母 (spec: orchestration)。
+        """
+        if task.conversation is None:
+            return None
+        if session.unavailable_reason is not None:
+            return (
+                TrialVerdict.INVALID,
+                InvalidReason.SIMULATOR_UNAVAILABLE,
+                (
+                    f"用户模拟器不可用, 会话无从继续: {session.unavailable_reason} "
+                    "(评测侧配置问题, 不折算为 agent 表现; 同 run 其余 trial 照常)"
+                ),
+                TerminationReason.AGENT_ERROR,
+            )
+        # 取消在会话中生效 (启动前已被取消的走 _cancelled_trial, 不经过这里):
+        # 证据照常落盘并标注终止原因, 该 trial 不计入通过率分母
+        if not cancel_before and bool(self._cancel_flags.get(run_id, False)):
+            return (
+                TrialVerdict.INVALID,
+                InvalidReason.TRIAL_CANCELLED,
+                "多轮会话进行中收到取消请求, 该 trial 按取消终止 "
+                "(已采集证据照常落盘, 不计入通过率分母)",
+                TerminationReason.CANCELLED,
+            )
+        declared = len(task.conversation.turns)
+        if declared and session.turns_consumed < declared:
+            adapter = type(self.agent_runner).__name__
+            return (
+                TrialVerdict.INVALID,
+                InvalidReason.CONVERSATION_NOT_CONSUMED,
+                (
+                    f"适配器 {adapter} 未走完套件声明的轮次: task '{task.id}' 声明了 "
+                    f"{declared} 轮后续话术, 实际只消费了 {session.turns_consumed} 轮 "
+                    f"(end_reason={session.end_reason or 'adapter_returned'})。"
+                    "多轮任务必须按会话行事, 评测侧不按已发生轮次给出看似完整的结论"
+                ),
+                TerminationReason.AGENT_ERROR,
+            )
+        return None
+
+    def _build_simulator(self, task: EvalTask) -> UserSimulator | None:
+        """按会话声明构造用户模拟器 (预写话术 / 目标驱动, 共用同一协议)。"""
+        conversation = task.conversation
+        if conversation is None:
+            return None
+        if conversation.turns:
+            return ScriptedUserSimulator(conversation.turns)
+        if conversation.goal:
+            if conversation.simulator and self.extensions is not None:
+                resolved, failure = self.extensions.resolve(
+                    "simulators", conversation.simulator
+                )
+                if resolved is None:
+                    available = self.extensions.names("simulators")
+                    return _UnavailableSimulator(
+                        reason=(
+                            f"模拟器 '{conversation.simulator}' 未注册"
+                            + (f" (导入失败: {failure})" if failure else "")
+                            + f"; 可用: {available or ['(无)']}"
+                        )
+                    )
+                return resolved
+            return GoalDrivenUserSimulator(
+                conversation.goal,
+                llm_fn=self.llm_fn,
+                redactor=self.redactor,
+            )
+        # 只声明了 events (无 turns/goal): 没有轮次供给方, 会话即刻结束 ——
+        # 适配器一次 next_user_message 都拿不到, 单轮适配器行为不变
+        return None
+
     async def _finish_collection(
         self,
         task: EvalTask,
@@ -1052,6 +1207,16 @@ class EvalRunner:
             if id(observation) not in known:
                 evidence.add(observation)
                 known.add(id(observation))
+
+        # ⑤: 注入产物 (模拟话术/事件/人工介入) 并进证据 —— transcript 通道
+        # harness 级, 与普通消息可区分; 用户侧输入序列随证据落盘构成重放脚本。
+        # 放在 finally 依赖的这里, 错误退出路径 (超时/异常) 也带得走已注入的产物。
+        known_all = {id(obs) for obs in evidence.all_observations()}
+        for observation in session.injected:
+            if id(observation) not in known_all:
+                evidence.add(observation)
+                known_all.add(id(observation))
+        evidence.user_inputs = list(session.user_inputs)
 
         if self.environment is None:
             return
@@ -1125,9 +1290,10 @@ class EvalRunner:
         termination: TerminationReason = TerminationReason.AGENT_ERROR,
         metrics: dict[str, float] | None = None,
         gaps: list[EvidenceGap] | None = None,
+        session: TrialSession | None = None,
     ) -> TrialResult:
         """采集相的产物: 一份带来源证据的 trial (尚未评分)。"""
-        return TrialResult(
+        trial = TrialResult(
             trial_index=index,
             trace_id=evidence.trace_id,
             success=success,
@@ -1146,6 +1312,10 @@ class EvalRunner:
             unrecognized_attributes=list(evidence.unrecognized_attributes),
             error=error,
         )
+        # 轮级过程量只进诊断块 (不进任何分母); 单轮任务为 None
+        if session is not None:
+            trial.session_diagnostics = session.diagnostics()
+        return trial
 
     @staticmethod
     def _first_budget_breach(
@@ -1215,6 +1385,7 @@ class EvalRunner:
         """
         evidence = trial.evidence or TrialEvidence()
         observations = self._observations_for(evidence)
+        env_identity, _env_version = self._environment_identity()
         context = EvalContext(
             run_id=run_id,
             task=task,
@@ -1223,6 +1394,7 @@ class EvalRunner:
             observations=observations,
             evidence=evidence,
             shared_state={},
+            environment_identity=env_identity,
         )
         trial = await self._grade_trial(trial, observations.source_spans, task, context)
         trial.weakest_evidence = self._weakest_support(trial)
@@ -1328,7 +1500,7 @@ class EvalRunner:
                         grader_type=config.type,
                         score=0.0,
                         passed=False,
-                        explanation=f"Unknown grader: {config.name}",
+                        explanation=self._unknown_grader_explanation(config),
                         verdict=TrialVerdict.INVALID,
                         invalid_reason=InvalidReason.UNKNOWN_GRADER,
                     ),
@@ -1545,16 +1717,41 @@ class EvalRunner:
     def _resolve_grader(self, config: GraderConfig) -> Grader | None:
         """按配置名解析 grader 实例。
 
-        metric 类配置 (type: metric) 的 name 即指标名, 不在 grader 注册表
-        内时回退到 "metric" 分发器 (D1), 由其按 metric_name/config.name
-        路由到注入的 Metric 实例; 其余类型保持未知 grader 语义。
+        顺序: 内置/注入注册表 → 发现注册表 (惰性导入, 失败按未注册) →
+        metric 分发器回退。metric 类配置 (type: metric) 的 name 即指标名,
+        不在 grader 注册表内时回退到 "metric" 分发器 (D1)。
         """
         grader = self._graders.get(config.name)
         if grader is not None:
             return grader
+        if self.extensions is not None:
+            discovered, _failure = self.extensions.resolve("graders", config.name)
+            if discovered is not None:
+                return discovered
         if config.type == GraderType.METRIC:
             return self._graders.get("metric")
         return None
+
+    def _unknown_grader_explanation(self, config: GraderConfig) -> str:
+        """未注册名字的失败信息: 列出可用名字, 并说明是否曾尝试加载外部包。"""
+        discovered = self.extensions.names("graders") if self.extensions else []
+        available = sorted([*self._graders, *discovered])
+        note = ""
+        if self.extensions is not None:
+            failures = {
+                name: reason
+                for name, reason in self.extensions.load_failures.items()
+                if name in self.extensions.attempted
+            }
+            if config.name in failures:
+                note = f"; 曾尝试从外部包加载但失败 ({failures[config.name]})"
+            elif self.extensions.attempted:
+                note = "; 本次曾尝试加载外部包: " + ", ".join(
+                    sorted(self.extensions.attempted)
+                )
+        return (
+            f"Unknown grader: {config.name} (可用: {available or ['(无)']}){note}"
+        )
 
     async def _multi_sample(
         self,

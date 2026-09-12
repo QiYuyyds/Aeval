@@ -1,0 +1,16 @@
+[project]
+name = "achat-eval-ext"
+version = "0.1.0"
+description = "AChat host-side Aeval extension demo (entry-point registered custom grader)"
+requires-python = ">=3.11"
+dependencies = ["aeval-framework"]
+
+[project.entry-points."agent_eval.graders"]
+achat_session_gate = "achat_eval_ext.grader:AchatSessionGateGrader"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/achat_eval_ext"]

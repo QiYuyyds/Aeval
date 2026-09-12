@@ -16,6 +16,15 @@ Contract assumed here (an HTTP eval API you control):
             "trace_id": str,         # OTel trace id ("" if unavailable)
         }
 
+Contract implemented here (agent_eval 0.3+, the ③ extension contract):
+
+    async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence
+
+One multi-turn trial is still ONE ``run()`` call: the framework supplies
+subsequent user turns via ``session.next_user_message()`` (scripted or
+goal-driven simulator; returns ``None`` when the conversation ends). All
+evidence returned/pushed through the session is archived under the same trial.
+
 Transient network failures are wrapped in TransientError so the framework
 retries with exponential backoff; anything else fails the trial immediately.
 
@@ -30,8 +39,8 @@ from typing import Any
 
 import httpx
 
-from agent_eval.core.contract import TransientError
-from agent_eval.core.types import EvalTask
+from agent_eval.core.contract import TransientError, TrialSession
+from agent_eval.core.types import TaskView, TrialEvidence
 
 
 class HTTPAgentRunner:
@@ -54,19 +63,48 @@ class HTTPAgentRunner:
         self.timeout = timeout
         self.max_transient_retries = max_transient_retries
 
-    async def run(self, task: EvalTask) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
-        """Execute one trial: submit the prompt, poll to completion."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            run_id = await self._submit(client, task)
-            return await self._poll(client, run_id)
+    async def run(self, view: TaskView, session: TrialSession) -> TrialEvidence:
+        """Execute one trial: submit the prompt, poll to completion.
 
-    async def _submit(self, client: httpx.AsyncClient, task: EvalTask) -> str:
+        Multi-turn: after the first turn (``view.prompt``) the framework may
+        offer further user turns through the session; this adapter keeps the
+        conversation going until the simulator runs out (``None``) and folds
+        every delivered turn into the submitted prompt thread.
+        """
+        messages: list[dict[str, Any]] = [{"role": "user", "content": view.prompt}]
+        trace_id = ""
+        final_transcript: list[dict[str, Any]] = []
+        outcome: dict[str, Any] = {}
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            while True:
+                run_id = await self._submit(client, view, messages)
+                final_transcript, outcome, trace_id = await self._poll(client, run_id)
+                # 会话维度 (可选): 套件声明了 conversation 才有多轮可取
+                next_turn = await session.next_user_message()
+                if next_turn is None:
+                    break
+                messages.append({"role": "user", "content": next_turn})
+                messages.append({"role": "assistant", "content": "(see transcript)"})
+
+        return TrialEvidence.runner_reported(
+            trace_id=trace_id,
+            transcript=final_transcript,
+            state=outcome,
+        )
+
+    async def _submit(
+        self,
+        client: httpx.AsyncClient,
+        view: TaskView,
+        messages: list[dict[str, Any]],
+    ) -> str:
         last_error: Exception | None = None
         for _ in range(self.max_transient_retries + 1):
             try:
                 resp = await client.post(
                     f"{self.base_url}/agent/run",
-                    json={"prompt": task.prompt, "env": task.env},
+                    json={"prompt": view.prompt, "env": view.env, "messages": messages},
                 )
                 resp.raise_for_status()
                 return resp.json()["run_id"]
@@ -77,7 +115,7 @@ class HTTPAgentRunner:
 
     async def _poll(
         self, client: httpx.AsyncClient, run_id: str
-    ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
         elapsed = 0.0
         while True:
             resp = await client.get(f"{self.base_url}/agent/runs/{run_id}")
@@ -85,7 +123,11 @@ class HTTPAgentRunner:
             data = resp.json()
 
             if data["status"] == "completed":
-                return data.get("trace_id", ""), data.get("transcript", []), data.get("outcome", {})
+                return (
+                    data.get("transcript", []),
+                    data.get("outcome", {}),
+                    data.get("trace_id", ""),
+                )
             if data["status"] == "failed":
                 raise RuntimeError(f"agent run failed: {data.get('error', 'unknown')}")
 

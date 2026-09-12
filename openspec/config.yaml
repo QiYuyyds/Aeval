@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  项目：Aeval —— 由 OpenTelemetry trace 驱动的开源 Agent 评测框架（MIT，当前 v0.1.0）。
+  项目：Aeval —— 由 OpenTelemetry trace 驱动的开源 Agent 评测框架（MIT，当前 v0.3.0）。
   命名四件套，勿混用：仓库 Aeval / PyPI 发行包 aeval-framework / Python 模块 agent_eval / CLI 命令 eval-suite。
   （PyPI 上的 agent-eval 属于无关项目 UK AISI agenteval。）
 
@@ -30,12 +30,13 @@ context: |
   - verify_clean 检出环境泄漏 → 自动 restore + 告警，不判 trial 失败（成败只由评分决定）
   - grader 按 dependencies 拓扑序执行，依赖未通过则跳过并给 0 分解释；同 run 内按 prompt-hash 缓存评分（可关）
   - LLM 侧依赖统一经 LLMFn 回调 (system, user) → text 注入；缺配置返回带原因的 0 分结果而非崩溃
-  - 扩展协议（core/contract.py）：AgentRunner 必选，另有 TraceProvider / Grader / Storage / EnvironmentManager
+  - 扩展协议（core/contract.py）：AgentRunner 必选，另有 TraceProvider / Grader / Storage / EnvironmentManager / UserSimulator
+  - 扩展点发现：graders / environments / simulators 各有 entry-point 组（agent_eval.*），惰性导入、同名冲突显式报错；CLI 与 /meta 读同一份注册结果
 
   能力词表（flat kebab-case，capability 路径与模块对齐，勿另造同义词）：
   suite-format, extension-contracts, orchestration, statistics, graders, llm-metrics, dataset,
   storage, trace-provider, rest-api, cli, dashboard
-  注：openspec/specs/ 目前为空，首个提案即锁定词表；后续提案复用已有路径，不新增域层级。
+  注：openspec/specs/ 自 v0.3.0 起由首个归档变更逐步填充；后续提案复用已有路径，不新增域层级。
 
   验证门：cd packages/agent-eval && pytest tests/ -q ；ruff check packages/agent-eval ；
   前端 pnpm --filter eval-dashboard build。离线测试无需外部服务，缺 API 凭据时 LLM-judge 用例自动 skip。

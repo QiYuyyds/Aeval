@@ -1,0 +1,39 @@
+name: achat-conversation-acceptance
+description: AChat 多轮会话验收 — 预写话术 + 运行中事件注入 + 事件之后判定 + entry-point 发现的宿主判据
+version: 0.4.0
+metadata:
+  purpose: host-conversation-acceptance
+
+tasks:
+  - id: flaky-test-triage
+    description: 多轮排查偶发失败测试 — 2 轮预写话术 + 1 次运行中事件注入 + 事件之后状态判定
+    prompt: >
+      这个测试用例偶发失败:重试三次后才通过。请先分析可能原因。
+    max_trials: 2
+    conversation:
+      turns:
+        - 已按你的建议加了显式等待,还是偶发。请看新的日志片段。
+        - 日志显示 CI 节点磁盘接近写满。请给出结论与修复建议。
+      events:
+        - after_turn: 1
+          message: "运行中事件:另一个用例也开始偶发失败,CI 节点磁盘水位告警"
+          data:
+            signal: disk-pressure
+    graders:
+      - type: code
+        name: code_based
+        config:
+          checks:
+            - type: contains
+              target: transcript
+              value: "磁盘"
+      - type: state
+        name: state_check
+        judgment_moment: after_last_event
+        config:
+          expectations:
+            - type: file_exists
+              path: diagnosis.md
+      - type: custom
+        name: achat_session_gate
+        config: {}

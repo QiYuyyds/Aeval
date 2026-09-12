@@ -25,6 +25,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from agent_eval.core.types import (
+    EVENT_CHANNEL,
+    FIRST_PROMPT_CHANNEL,
+    HUMAN_MESSAGE_CHANNEL,
+    SIMULATED_USER_CHANNEL,
     EvalSuite,
     EvalTask,
     EvidenceKind,
@@ -79,6 +83,67 @@ class ExternalDependencyError(AgentRunError):
     classification = "external_dependency"
 
 
+# ─── User simulator (⑤: extension-contracts) ─────────────────────────────────
+
+
+@dataclass
+class SimulatorContext:
+    """模拟器的输入视图 —— 只含任务描述、目标与本 trial 已有的对话历史。
+
+    判据、期望输出与答案键不在这个类型里 (沿用 ③ 的信息屏障语义:
+    「读不到」而不是「别去读」), 答案因此无法经由对话被洗进被评系统。
+    """
+
+    task_id: str = ""
+    description: str = ""
+    first_prompt: str = ""
+    goal: str | None = None
+    # 已有对话历史: [{"role", "content", "at", "channel"}], 按发生顺序
+    history: list[dict[str, Any]] = field(default_factory=list)
+    max_turns: int | None = None
+
+
+@dataclass
+class SimulatorReply:
+    """模拟器的一句话术产出。
+
+    ``end=True`` 表示模拟器认为目标已达成、建议收尾 —— 收尾判定权在框架:
+    框架核对边界 (轮数上限/取消/预算) 后才会结束会话, 并把收尾原因落盘。
+    ``unavailable_reason`` 非空 = 本次产不出话术 (缺配置等), 框架据此给
+    带原因的不可用结论, 不让 trial 崩溃。
+    """
+
+    text: str = ""
+    end: bool = False
+    prompt: str | None = None  # 生成本句所用提示词 (经脱敏后随证据留痕)
+    unavailable_reason: str | None = None
+
+
+@runtime_checkable
+class UserSimulator(Protocol):
+    """用户侧模拟器协议 (⑤: extension-contracts)。
+
+    预写话术与目标驱动两种模式共用这一个协议:
+    - 预写话术: 按序弹出, 不调用任何模型 (确定性, CI 用);
+    - 目标驱动: 依据 ``context.goal`` 与已有历史生成下一句, 通常经 LLMFn。
+
+    实现方 MUST NOT 在协议内拿到期望输出或答案键 —— ``SimulatorContext``
+    从类型上就不含它们。
+    """
+
+    name: str
+    implementation_version: str
+
+    async def next_message(self, context: SimulatorContext) -> SimulatorReply | None:
+        """产出下一句用户话术。
+
+        Returns:
+            SimulatorReply: 下一句话术; ``end=True`` 表示建议收尾。
+            None: 会话结束 (预写话术用尽 / 模拟器主动收尾后的后续调用)。
+        """
+        ...
+
+
 # ─── Evaluation Context ───────────────────────────────────────────────────────
 
 
@@ -108,6 +173,9 @@ class EvalContext:
     evidence: TrialEvidence | None = None
     shared_state: dict[str, Any] = field(default_factory=dict)
     grader_config: GraderConfig | None = None
+    # ⑤: 本次运行的环境身份 ('none' = 未装配环境; None = 未记录) ——
+    # 声明了环境检查判据却无环境时, 判据用它给出「缺环境装配」的原因
+    environment_identity: str | None = None
 
 
 # ─── Trial session ────────────────────────────────────────────────────────────
@@ -119,6 +187,11 @@ class TrialSession:
     三个能力全是可选的 —— 一个只用 ``run()`` 返回值的接入方与今天一样简单。
     框架会把 ``emit`` 进来的读数与探针读数并进返回的证据里, 因此适配层不需要
     自己维护完整账本; 反过来, 它也不能靠返回值覆盖探针得到的读数。
+
+    ⑤ 新增 (仍全部可选, 单轮适配器一个都不碰即与此前逐位一致):
+    - ``next_user_message()``: 多轮会话中取下一条用户消息 (框架经模拟器供给);
+    - ``inject_event()`` / ``human_message()``: 运行中事件与人工介入,
+      带时刻以 harness 来源进 transcript 证据。
     """
 
     def __init__(
@@ -127,12 +200,20 @@ class TrialSession:
         probe: ProbeFn | None = None,
         deadline_ms: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        simulator: UserSimulator | None = None,
+        conversation: Any | None = None,
+        first_user_message: str | None = None,
     ):
         """
         Args:
             probe: 评测侧取证回调; None = 该环境未接入探针 (读数按缺失归类)
             deadline_ms: 本次 trial 的绝对截止时刻 (epoch 毫秒); None = 未设时限
             cancelled: 取消状态查询 (框架的取消旗标)
+            simulator: 用户模拟器 (框架构造, 适配器经 ``next_user_message`` 消费);
+                None = 单轮任务 (多轮钩子全部不可用, 行为与此前逐位一致)
+            conversation: 会话声明 (ConversationSpec; 事件排程/目标/轮数上限)
+            first_user_message: 首轮用户输入 (仅供用户侧输入序列落盘; 声明了
+                会话才会记录)
         """
         self._probe = probe
         self.deadline_ms = deadline_ms
@@ -140,6 +221,41 @@ class TrialSession:
         self.emitted: list[Observation] = []
         self.probe_readings: list[Observation] = []
         self._last_moment = 0.0
+        # ── ⑤: 会话状态 ──
+        self._simulator = simulator
+        self._conversation = conversation
+        self.turns_consumed = 0
+        self.conversation_ended = False
+        self.end_reason: str | None = None
+        self.unavailable_reason: str | None = None
+        # 注入产物 (transcript 通道, harness 来源): runner 并进证据
+        self.injected: list[Observation] = []
+        # 用户侧输入序列 (可重放脚本): runner 并进 evidence.user_inputs
+        self.user_inputs: list[Observation] = []
+        self._history: list[dict[str, Any]] = []
+        self._pending_events: list[Any] = list(
+            sorted(
+                getattr(conversation, "events", None) or [],
+                key=lambda e: e.after_turn,
+            )
+        ) if conversation is not None else []
+        self.events_injected = 0
+        self.human_messages = 0
+        if simulator is not None and first_user_message:
+            moment = self._next_moment()
+            self.user_inputs.append(
+                Observation(
+                    kind=EvidenceKind.TRANSCRIPT,
+                    observed_by=ObservedBy.HARNESS,
+                    observed_at=moment,
+                    channel=FIRST_PROMPT_CHANNEL,
+                    value={"role": "user", "content": first_user_message, "turn": 0},
+                )
+            )
+            self._history.append(
+                {"role": "user", "content": first_user_message, "at": moment,
+                 "channel": FIRST_PROMPT_CHANNEL}
+            )
 
     def _next_moment(self) -> float:
         """一次取证 = 一个时刻。
@@ -232,6 +348,161 @@ class TrialSession:
     def over_deadline(self) -> bool:
         remaining = self.remaining_ms
         return remaining is not None and remaining <= 0
+
+    # ── ⑤: 多轮会话钩子 (挂在框架产出的会话对象上; 适配器可选消费) ──
+
+    async def next_user_message(self) -> str | None:
+        """多轮会话: 取下一条用户消息; None = 会话结束。
+
+        轮次由框架经模拟器供给 (预写话术零模型调用; 目标驱动经模拟器协议),
+        适配器向会话要下一轮而不是被反复调用 —— ``AgentRunner`` 契约不变。
+        每条产出以 harness 来源带时刻进 transcript 证据, 与普通消息可区分。
+        """
+        if self._simulator is None:
+            return None
+        self._inject_pending_events()
+        if self.conversation_ended:
+            return None
+        context = SimulatorContext(
+            task_id=str(getattr(self._conversation, "id", "") or ""),
+            description=str(getattr(self._conversation, "description", "") or ""),
+            first_prompt=self._first_prompt(),
+            goal=getattr(self._conversation, "goal", None),
+            history=list(self._history),
+            max_turns=getattr(self._conversation, "max_turns", None),
+        )
+        reply = await self._simulator.next_message(context)
+        if reply is None:
+            self.conversation_ended = True
+            self.end_reason = self.end_reason or "simulator_exhausted"
+            return None
+        if reply.unavailable_reason:
+            # 带原因的不可用: 不崩溃, 由 runner 据此给 invalid 结论
+            self.conversation_ended = True
+            self.unavailable_reason = reply.unavailable_reason
+            self.end_reason = f"simulator_unavailable: {reply.unavailable_reason}"
+            return None
+        if reply.end and not reply.text:
+            # 纯收尾信号 (无附带话术): 目标达成, 会话就此结束, 不多消费一轮
+            self.conversation_ended = True
+            self.end_reason = "goal_achieved"
+            return None
+        if (
+            context.max_turns is not None
+            and self.turns_consumed >= context.max_turns
+        ):
+            self.conversation_ended = True
+            self.end_reason = "max_turns_reached"
+            return None
+        self.turns_consumed += 1
+        moment = self._next_moment()
+        value: dict[str, Any] = {
+            "role": "user",
+            "content": reply.text,
+            "turn": self.turns_consumed,
+            "simulated": True,
+        }
+        if reply.prompt is not None:
+            value["simulator_prompt"] = reply.prompt
+        observation = Observation(
+            kind=EvidenceKind.TRANSCRIPT,
+            observed_by=ObservedBy.HARNESS,
+            observed_at=moment,
+            channel=SIMULATED_USER_CHANNEL,
+            value=value,
+        )
+        self.injected.append(observation)
+        self.user_inputs.append(observation)
+        self._history.append(
+            {"role": "user", "content": reply.text, "at": moment,
+             "channel": SIMULATED_USER_CHANNEL}
+        )
+        if reply.end:
+            # 收尾判定权在框架: 模拟器的 end 只是建议, 这里核对后落盘原因
+            self.conversation_ended = True
+            self.end_reason = "goal_achieved"
+        return reply.text
+
+    def inject_event(
+        self,
+        message: str,
+        *,
+        data: dict[str, Any] | None = None,
+        channel: str = EVENT_CHANNEL,
+    ) -> Observation:
+        """运行中注入一个环境事件 (如文件被外部改动)。
+
+        带采集时刻、以 harness 来源进 transcript 证据, 与普通消息可区分;
+        「事件之后」类判定时刻正是从这里取界定点。
+        """
+        moment = self._next_moment()
+        value: dict[str, Any] = {"event": message, "injected": True}
+        if data:
+            value["data"] = data
+        observation = Observation(
+            kind=EvidenceKind.TRANSCRIPT,
+            observed_by=ObservedBy.HARNESS,
+            observed_at=moment,
+            channel=channel or EVENT_CHANNEL,
+            value=value,
+        )
+        self.injected.append(observation)
+        self.user_inputs.append(observation)
+        self.events_injected += 1
+        self._history.append(
+            {"role": "event", "content": message, "at": moment, "channel": channel}
+        )
+        return observation
+
+    def human_message(self, text: str) -> Observation:
+        """运行中注入一条人工介入消息 (对齐 Inspect 的 Intervention 语义)。
+
+        与 ``inject_event`` 同一落盘语义: harness 来源 + 时刻, 结论可标注
+        该 trial 含人工介入。
+        """
+        moment = self._next_moment()
+        observation = Observation(
+            kind=EvidenceKind.TRANSCRIPT,
+            observed_by=ObservedBy.HARNESS,
+            observed_at=moment,
+            channel=HUMAN_MESSAGE_CHANNEL,
+            value={"role": "user", "content": text, "human": True},
+        )
+        self.injected.append(observation)
+        self.user_inputs.append(observation)
+        self.human_messages += 1
+        self._history.append(
+            {"role": "user", "content": text, "at": moment,
+             "channel": HUMAN_MESSAGE_CHANNEL}
+        )
+        return observation
+
+    def diagnostics(self) -> dict[str, Any] | None:
+        """轮级过程量 (只进报告诊断块, 不进任何分母); 单轮任务返回 None。"""
+        if self._simulator is None:
+            return None
+        return {
+            "turns_declared": len(getattr(self._conversation, "turns", None) or []) or None,
+            "goal": getattr(self._conversation, "goal", None),
+            "max_turns": getattr(self._conversation, "max_turns", None),
+            "turns_consumed": self.turns_consumed,
+            "events_injected": self.events_injected,
+            "human_messages": self.human_messages,
+            "end_reason": self.end_reason,
+            "unavailable_reason": self.unavailable_reason,
+        }
+
+    def _first_prompt(self) -> str:
+        for item in self._history:
+            if item.get("channel") == FIRST_PROMPT_CHANNEL:
+                return str(item.get("content", ""))
+        return ""
+
+    def _inject_pending_events(self) -> None:
+        """把排程点已到的事件注入 (after_turn <= 已消费轮数), 保持声明顺序。"""
+        while self._pending_events and self._pending_events[0].after_turn <= self.turns_consumed:
+            event = self._pending_events.pop(0)
+            self.inject_event(event.message, data=event.data or None)
 
 
 # ─── Required Contract ────────────────────────────────────────────────────────

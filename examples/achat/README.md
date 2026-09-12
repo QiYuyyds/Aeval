@@ -39,3 +39,22 @@ http-agent = "examples.achat.http_agent_runner:create_runner"
 - `env.conversation` — 全量覆盖会话形态（`mode` / `agent_ids` / `dispatch_mode`）；与 `env.agent_id` 并存时 conversation 胜出
 
 注意：`achat_dispatch` grader 仅注册于 AChat 侧装配（`create_aeval_runner`），且读取 `tool.dispatch` spans —— 需 `TRACE_ENABLED=true`，tracing 关闭时完成率按 0 计。非法组合（如 group 但 agent_ids < 2）在建会话前即报错，不静默回退。
+
+## 多轮会话验收套件（0.4.0）
+
+`conversation-suite.yaml` 是宿主侧多轮验收的最小样本：2 轮预写话术 + 1 次运行中事件注入 + 一个 `after_last_event` 判据 + 一个经 entry point 发现的宿主自定义判据。
+
+```bash
+# 1. 安装宿主扩展包（注册 agent_eval.graders 组的 achat_session_gate）
+pip install -e ./eval-ext
+eval-suite extensions                 # 应看到 achat_session_gate (from achat-eval-ext)
+
+# 2. 校验套件（离线）
+eval-suite validate conversation-suite.yaml
+
+# 3. 真流量运行（需要 AEVAL_AGENT_URL 指向按 ③ 契约实现的 HTTP Agent；
+#    真实 agent 调用数 = trial × 轮数 = 2 × 3）
+AEVAL_AGENT_URL=http://127.0.0.1:8000 eval-suite run conversation-suite.yaml
+```
+
+`http_agent_runner.py` 已实现 0.3+ 契约 `run(view: TaskView, session: TrialSession) -> TrialEvidence`，并演示了多轮消费（`session.next_user_message()` 直到会话结束）。

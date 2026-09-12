@@ -36,6 +36,8 @@ from typing import Any
 
 from agent_eval.core.contract import EvalContext
 from agent_eval.core.types import (
+    EVENT_CHANNEL,
+    NO_ENVIRONMENT,
     EvalTask,
     GraderConfig,
     GraderResult,
@@ -101,7 +103,7 @@ class StateCheckGrader:
             return evidence_unavailable_result(
                 self.name,
                 GraderType.STATE,
-                _missing_reasons(evidence, moment, grader_config),
+                _missing_reasons(evidence, moment, grader_config, context),
                 details={
                     "judgment_moment": moment.value,
                     "declared_evidence": _declared_names(grader_config),
@@ -185,8 +187,10 @@ def _missing_reasons(
     evidence: TrialEvidence | None,
     moment: JudgmentMoment,
     grader_config: GraderConfig | None,
+    context: EvalContext | None = None,
 ) -> list[tuple[str, str]]:
-    """说清缺的是哪一级、为什么 —— 「没有证据」和「没授权读证据」不是一回事。"""
+    """说清缺的是哪一级、为什么 —— 「没有证据」「没授权读证据」「没装配环境」
+    不是一回事, 不得折成被评方失败。"""
     reasons: list[tuple[str, str]] = []
     for level in consultable_levels(grader_config):
         series = evidence.state_series(level) if evidence else []
@@ -199,6 +203,19 @@ def _missing_reasons(
         )
     if moment is JudgmentMoment.ANY_TIME and evidence is not None and not evidence.observed_window:
         reasons.append(("state.window", "provider_unavailable"))
+    if moment is JudgmentMoment.AFTER_LAST_EVENT:
+        if evidence is not None and not any(
+            obs.channel == EVENT_CHANNEL and not obs.is_absent
+            for obs in evidence.transcript
+        ):
+            # 声明了「事件之后」却无注入事件: 报证据不足, 不静默退化为「结束时」
+            reasons.append(("state.event", "no_event_injected"))
+        else:
+            reasons.append(("state.event_after", "no_state_reading_after_event"))
+    if context is not None and context.environment_identity == NO_ENVIRONMENT:
+        # 声明了环境检查判据却未装配任何环境: 指明缺环境装配,
+        # 而不是按「文件不存在」判被评方失败 (spec: cli)
+        reasons.append(("environment", "no_environment_assembled"))
     return reasons
 
 

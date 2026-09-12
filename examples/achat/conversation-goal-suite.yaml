@@ -1,0 +1,23 @@
+name: achat-goal-acceptance
+description: AChat 目标驱动模拟器验收 — 收尾判定归框架
+version: 0.4.0
+metadata:
+  purpose: host-goal-simulator-acceptance
+
+tasks:
+  - id: goal-driven-triage
+    description: 目标驱动多轮 — 模拟器依 goal 追问, 框架按收尾判定结束会话
+    prompt: >
+      这个测试用例偶发失败:重试三次后才通过。请分析原因并给出修复建议。
+    max_trials: 1
+    conversation:
+      goal: 拿到对偶发失败原因的明确结论, 以及一条可执行的修复建议
+      max_turns: 3
+    graders:
+      - type: code
+        name: code_based
+        config:
+          checks:
+            - type: contains
+              target: transcript
+              value: "偶发"

@@ -442,3 +442,109 @@ class StepWasteMetric(Metric):
 ### 11.4 LLM 函数与脱敏钩子的注入
 
 注入约定不变：runner 把 `llm_fn` 注入未自行配置的指标。0.3.0 起同时注入 `redactor`（脱敏钩子）—— 轨迹进 judge 提示词前应经 `self.redactor` 处理（`HashingEvidenceRedactor` 幂等，重复应用无副作用）。
+
+## 12. UserSimulator（可选，0.4.0）
+
+目标驱动会话需要模拟器时实现同一个协议（预写话术不需要 —— 框架内置 `ScriptedUserSimulator`，零模型调用）：
+
+```python
+from typing import Any
+from agent_eval.core.contract import SimulatorContext, SimulatorReply, UserSimulator
+
+
+class SocraticSimulator:
+    """示例：每轮追问一个未澄清点；认为目标达成时返回 end=True。"""
+
+    name = "socratic"
+    implementation_version = "1"
+
+    def __init__(self, llm_fn=None, redactor=None):
+        self.llm_fn = llm_fn          # (system, user) -> text，与 judge 同一注入约定
+        self.redactor = redactor      # 提示词过脱敏钩子再进证据
+
+    async def next_message(self, context: SimulatorContext) -> SimulatorReply | None:
+        # context 只含 task_id / description / first_prompt / goal / history / max_turns
+        # —— 判据与期望输出不在类型里，答案键经对话洗不进被评系统
+        if self.llm_fn is None:
+            return SimulatorReply(unavailable_reason="缺 llm_fn 配置")  # 带原因的不可用，不崩溃
+        prompt = self._render(context)  # 依据 goal + history 生成提问
+        text = (await self.llm_fn(SYSTEM, prompt)).strip()
+        if text == "[END]":
+            return SimulatorReply(text="", end=True, prompt=self.redactor.redact(prompt))
+        return SimulatorReply(text=text, end=False, prompt=self.redactor.redact(prompt))
+```
+
+要点：
+
+- 收尾判定权归**框架**：`end=True` 只是模拟器的建议，框架核对轮数上限/取消/预算后才会结束会话，收尾原因落盘到 `session_diagnostics.end_reason`；
+- 缺配置返回 `unavailable_reason` 而非抛异常：该 trial 判 `invalid`（`simulator_unavailable`），同 run 其余 trial 照常；
+- 每句话术连同时刻与所用提示词（经脱敏）进证据，供事后复核；
+- 注册名经 `agent_eval.simulators` entry-point 组上架（见 §13），套件里用 `conversation.simulator: <名字>` 引用；不指定则用内置目标驱动模拟器。
+
+## 13. entry-point 发现：把自定义判据/环境/模拟器上架命令行（0.4.0）
+
+v0.3.0 及之前，自定义 grader 只能在库层注入 `EvalRunner(graders=[...])`，`eval-suite run` 拿不到。0.4.0 起通过 entry-point 组发现，**命令行与 API 读同一份注册结果**：
+
+| entry-point 组 | 装配目标 | 套件引用方式 |
+| --- | --- | --- |
+| `agent_eval.graders` | 自定义评分器 | `graders: - type: custom, name: <名字>` |
+| `agent_eval.environments` | 环境管理器 | `suite.environment: <名字>` |
+| `agent_eval.simulators` | 用户模拟器 | `task.conversation.simulator: <名字>` |
+
+最小可跑包示例（目录结构 + `pyproject.toml`）：
+
+```
+my-aeval-ext/
+├── pyproject.toml
+└── src/
+    └── my_aeval_ext/
+        ├── __init__.py
+        └── grader.py
+```
+
+```toml
+# pyproject.toml
+[project]
+name = "my-aeval-ext"
+version = "0.1.0"
+dependencies = ["aeval-framework[cli]"]
+
+[project.entry-points."agent_eval.graders"]
+my_gate = "my_aeval_ext.grader:MyGateGrader"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+```
+
+```python
+# src/my_aeval_ext/grader.py
+from agent_eval.core.contract import EvalContext, Grader
+from agent_eval.core.types import GraderResult, GraderType, TrialResult
+
+
+class MyGateGrader(Grader):
+    name = "my_gate"
+    grader_type = GraderType.CUSTOM
+
+    async def grade(self, trial: TrialResult, spans, task, context: EvalContext | None = None):
+        return GraderResult(
+            grader_name=self.name,
+            grader_type=self.grader_type,
+            score=1.0 if "done" in str(trial.outcome) else 0.0,
+            passed="done" in str(trial.outcome),
+            explanation="host custom grader",
+        )
+```
+
+```bash
+pip install -e ./my-aeval-ext
+eval-suite extensions          # 列出内置 + 发现的扩展点及其来源包
+eval-suite run my-suite.yaml   # 套件直接引用 name: my_gate
+```
+
+发现语义（对照 §2 的库层装配，两者共用一套协议）：
+
+- **惰性导入**：只在套件引用某名字时才导入其宿主包；导入异常降级为「该扩展点不可用」告警，装配继续，引用到它按未注册处理（`unknown_grader`，错误信息列出可用名字并注明曾尝试加载的外部包）；
+- **同名冲突显式报错**：两个包注册同一名字 → 装配期 `ExtensionConflictError` 并列出两个来源包，不静默覆盖；
+- 列表命令：`eval-suite extensions`；REST 侧 `/meta` 的 `capabilities.extensions` 与它同源。

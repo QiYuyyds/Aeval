@@ -97,6 +97,21 @@ def meta_payload(
     同一大版本内响应结构向后兼容, 但统计口径的数值语义可能变化 —— 口径版本
     必须显式公布, 调用方才能判断两个 run 是否可直接比较。
     """
+    # 扩展点发现与 CLI 同源 (core/discovery.discover_extensions):
+    # 两处给出的自定义判据/环境/模拟器名字集合必须一致, 不允许
+    # 「接口看得见、命令行用不上」的分歧 (spec: cli)。
+    from agent_eval.core.discovery import discover_extensions
+
+    try:
+        discovered = discover_extensions().catalog()
+    except Exception:  # noqa: BLE001 — 元数据异常不阻断 /meta
+        discovered = {}
+    discovered_graders = [e["name"] for e in discovered.get("graders", [])]
+    builtin_graders = [g["name"] for g in get_grader_catalog()]
+    # 发现的自定义判据追加在内置之后 (去重); 与 CLI extensions 清单同一份来源
+    graders = sorted(builtin_graders) + sorted(
+        n for n in discovered_graders if n not in builtin_graders
+    )
     return {
         "name": "Aeval",
         "package": DISTRIBUTION_NAME,
@@ -120,7 +135,12 @@ def meta_payload(
             "capture_is_one_declaration": True,
         },
         "capabilities": {
-            "graders": [g["name"] for g in get_grader_catalog()],
+            "graders": graders,
+            "extensions": discovered,
+            "user_simulation": True,
+            "run_event_injection": True,
+            "judgment_moments": ["at_end", "not_at_end", "any_time", "after_last_event"],
+            "environment_identity_boundary": True,
             "storage": ["memory", "sqlite"],
             "trace_providers": ["phoenix (optional, lazily imported)"],
             "sse": True,

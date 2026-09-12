@@ -77,6 +77,8 @@ class InvalidReason(str, Enum):
     TRIAL_CANCELLED = "trial_cancelled"  # 取消生效后未运行, 评测没跑完
     EVIDENCE_LEVEL_MISMATCH = "evidence_level_mismatch"  # 结论依据了未声明来源级别的证据
     SUBJECT_ONLY_EVIDENCE = "subject_only_evidence"  # 通过只由被评方自报证据支撑
+    CONVERSATION_NOT_CONSUMED = "conversation_not_consumed"  # 声明轮数未被适配器消费完
+    SIMULATOR_UNAVAILABLE = "simulator_unavailable"  # 用户模拟器不可用 (缺配置等)
 
 
 class TerminationReason(str, Enum):
@@ -152,6 +154,17 @@ class EvidenceKind(str, Enum):
     BUDGET = "budget"  # 资源用量读数
 
 
+# transcript 里的特殊通道名 (⑤: 事件/人工介入/模拟用户与普通消息可区分; 来源一律 harness)
+EVENT_CHANNEL = "environment_event"
+HUMAN_MESSAGE_CHANNEL = "human_message"
+SIMULATED_USER_CHANNEL = "simulated_user"
+FIRST_PROMPT_CHANNEL = "user_prompt"
+
+# EvidenceBoundary 的环境身份哨兵值: 无环境参与时显式记「无环境」, 与
+# 「历史 run 未记录」(None) 严格区分
+NO_ENVIRONMENT = "none"
+
+
 class JudgmentMoment(str, Enum):
     """环境状态判据所依据的**时刻**。
 
@@ -162,6 +175,7 @@ class JudgmentMoment(str, Enum):
     AT_END = "at_end"  # 结束时成立 (默认)
     NOT_AT_END = "not_at_end"  # 结束时不成立 (断言某物已被清掉)
     ANY_TIME = "any_time"  # 历史上任一时刻成立 (只有多次探针读数时才判得了)
+    AFTER_LAST_EVENT = "after_last_event"  # 最后一个注入事件之后成立 (新增值非破坏)
 
 
 class Observation(BaseModel):
@@ -279,6 +293,85 @@ class CapturePolicy(BaseModel):
 _CAPTURE_CLOSED = CapturePolicy()
 
 
+class ConversationEvent(BaseModel):
+    """会话中的一条运行中事件注入声明 (suite-format)。
+
+    第 ``after_turn`` 条用户消息被消费后, 框架在下一条用户消息交付前注入该事件;
+    事件带采集时刻以 harness 来源进入 transcript 证据 (spec: extension-contracts)。
+    """
+
+    after_turn: int = Field(
+        ..., ge=0, description="第几轮用户消息消费后注入 (0 = 首轮交付之前)"
+    )
+    message: str = Field(..., min_length=1, description="事件描述 (进入 transcript 证据)")
+    data: dict[str, Any] = Field(
+        default_factory=dict, description="事件附带的 JSON 数据 (可选)"
+    )
+
+
+class ConversationSpec(BaseModel):
+    """task 的会话维度声明 (suite-format, ⑤ 新增, 可选)。
+
+    ``prompt`` 保持必填且语义为首轮用户输入; ``turns`` 是其后的预写话术序列,
+    ``goal`` 交给目标驱动模拟器。两者互斥 —— 一个说「轮次已定」, 一个说
+    「轮次由模拟器决定」, 同时声明就是自相矛盾。
+    """
+
+    turns: list[str] = Field(
+        default_factory=list,
+        description="预写话术序列 (确定性、零模型调用; 每条 = 首轮之后的一条用户消息)",
+    )
+    goal: str | None = Field(
+        None,
+        description="目标驱动模拟器的目标描述 (轮数由模拟器决定); 与 turns 互斥",
+    )
+    simulator: str | None = Field(
+        None,
+        description="目标驱动模式使用的用户模拟器注册名; None = 内置目标驱动模拟器",
+    )
+    max_turns: int | None = Field(
+        None,
+        ge=1,
+        description="目标驱动模式的轮数上限 (安全阀, 防止对话不收敛); None = 无上限",
+    )
+    events: list[ConversationEvent] = Field(
+        default_factory=list,
+        description="运行中事件注入声明 (按 after_turn 排程; 与话术/目标两种模式均可叠加)",
+    )
+
+    @model_validator(mode="after")
+    def _validate_turns_goal_mutex(self) -> ConversationSpec:
+        if self.turns and self.goal:
+            raise ValueError(
+                "conversation.turns 与 conversation.goal 不可并存: turns 声明固定轮次, "
+                "goal 声明由模拟器自行决定轮数, 同时给出即自相矛盾 "
+                "(固定轮次请删 goal, 目标驱动请删 turns)"
+            )
+        schedule_points = [e.after_turn for e in self.events]
+        duplicated = sorted({p for p in schedule_points if schedule_points.count(p) > 1})
+        if duplicated:
+            raise ValueError(
+                f"conversation.events 含重复的 after_turn 排程: {duplicated} "
+                "(同一轮之后的多个事件请合并为一条或使用不同排程点)"
+            )
+        return self
+
+
+class EnvironmentDeclaration(BaseModel):
+    """task 的环境初始态/fixture 声明 (storage/orchestration, ⑤ 新增, 可选)。
+
+    由 ``EnvironmentManager.setup(task)`` 从既有 task 句柄读取 (签名不变):
+    环境实现自己决定如何消费 ``fixture``; 框架只负责把它递进去并把声明随
+    证据边界落盘, 使「同一结论出自同一个环境」可核对。
+    """
+
+    id: str | None = Field(None, description="环境标识 (如 'pytest-sandbox-v2')")
+    version: str | None = Field(None, description="初始态声明版本")
+    fixture: dict[str, Any] = Field(
+        default_factory=dict, description="初始态/fixture 数据 (由环境实现消费)"
+    )
+
+
 class GateSpec(BaseModel):
     """判据的门声明 —— 乘性合成时该判据失败会把总分按因子塌缩。"""
 
@@ -342,7 +435,8 @@ class GraderConfig(BaseModel):
     )
     judgment_moment: JudgmentMoment = Field(
         JudgmentMoment.AT_END,
-        description="环境状态类判据所依据的时刻 (默认「结束时」); 时刻随结论可见",
+        description="环境状态类判据所依据的时刻 (默认「结束时」; 可选 at_end / "
+        "not_at_end / any_time / after_last_event); 时刻随结论可见",
     )
 
     # ── reward_basis 门 (spec: graders 乘性安全门) ──
@@ -439,6 +533,18 @@ class EvalTask(BaseModel):
     )
     cost_budget: float | None = Field(
         None, gt=0.0, description="成本上限 (仅当单价表可折算 cost_usd 时生效)"
+    )
+
+    # ── 会话与环境声明 (⑤: suite-format / storage) ──
+    conversation: ConversationSpec | None = Field(
+        None,
+        description="会话维度声明 (预写话术 turns / 目标驱动 goal + 事件注入 events); "
+        "None = 单轮任务, 行为与本变更前逐位一致",
+    )
+    environment: EnvironmentDeclaration | None = Field(
+        None,
+        description="环境初始态/fixture 声明 (由 EnvironmentManager.setup(task) 消费); "
+        "None = 不声明初始态",
     )
 
     # ── 证据边界 ──
@@ -575,6 +681,11 @@ class EvalSuite(BaseModel):
         description="suite 级总分合成方式 (默认 additive, 与 0.2.0 逐位一致); "
         "task 级可覆盖。multiplicative 时每个 task 仍须至少一个非门判据",
     )
+    environment: str | None = Field(
+        None,
+        description="本套件使用的环境管理器注册名 (经扩展点发现装配; 内置无环境); "
+        "None = 不装配环境 (声明了环境检查判据的 task 将报证据不足)",
+    )
 
     @field_validator("name")
     @classmethod
@@ -688,6 +799,14 @@ class EvidenceBoundary(BaseModel):
     mapping_version: str | None = Field(None, description="翻译表版本")
     redactor_identifier: str | None = Field(None, description="脱敏处理标识")
     redactor_version: str | None = Field(None, description="脱敏处理版本")
+    environment_identity: str | None = Field(
+        None,
+        description="本次评测使用的环境身份 (标识; 无环境参与时显式为 'none'); "
+        "None = 历史 run 未记录 (读回为空且不报错)",
+    )
+    environment_version: str | None = Field(
+        None, description="环境版本/初始态声明版本; None = 未声明或未记录"
+    )
     unrecognized_attributes: list[str] = Field(
         default_factory=list, description="映射不认识、因而不参与归一化的属性名"
     )
@@ -731,6 +850,25 @@ class EvidenceBoundary(BaseModel):
                 "脱敏处理不同: "
                 f"{self.redactor_identifier}@{self.redactor_version} vs "
                 f"{other.redactor_identifier}@{other.redactor_version}"
+            )
+        if self.environment_identity != other.environment_identity:
+            missing = [
+                side
+                for side, identity in (("A", self.environment_identity), ("B", other.environment_identity))
+                if identity is None
+            ]
+            if missing:
+                return False, (
+                    f"{'/'.join(missing)} 方 run 未记录环境身份 (历史 run), "
+                    "无法核对是否同一环境"
+                )
+            return False, (
+                f"环境身份不同: {self.environment_identity} vs {other.environment_identity} "
+                "(结论可能出自不同环境, 不构成方向性依据)"
+            )
+        if self.environment_version != other.environment_version:
+            return False, (
+                f"环境初始态版本不同: {self.environment_version} vs {other.environment_version}"
             )
         return True, None
 
@@ -798,6 +936,11 @@ class TrialEvidence(BaseModel):
         "ok", description="取证通道的产出状态: 没取到 ≠ 什么都没发生"
     )
     trace_detail: str = Field("", description="取证通道报错原文等说明")
+    user_inputs: list[Observation] = Field(
+        default_factory=list,
+        description="用户侧输入序列 (首轮 + 话术/模拟产物 + 注入事件 + 人工介入), "
+        "按发生顺序带时刻 —— 会话可离线重放的脚本; 空 = 单轮任务或历史 run",
+    )
 
     # ── 最简接入: 跑完一次返回证据 ──────────────────────────────────────────
 
@@ -973,6 +1116,32 @@ class TrialEvidence(BaseModel):
                 (first_absent.detail if first_absent is not None else "")
                 or f"{observed_by.value} 级未产出可用的状态读数"
             )
+            return window
+
+        if moment is JudgmentMoment.AFTER_LAST_EVENT:
+            event_moments = [
+                obs.observed_at
+                for obs in self.transcript
+                if obs.channel == EVENT_CHANNEL and not obs.is_absent
+            ]
+            if not event_moments:
+                # 声明了「事件之后」却没有注入事件: 报证据不足, 不静默退化为「结束时」
+                window.reason = AbsentReason.PROVIDER_UNAVAILABLE.value
+                window.detail = "本次 trial 没有注入任何环境事件, 「事件之后」无从界定"
+                return window
+            cutoff = max(event_moments)
+            after = [obs for obs in usable if obs.observed_at > cutoff]
+            if not after:
+                window.reason = AbsentReason.PROVIDER_UNAVAILABLE.value
+                window.detail = (
+                    f"最后一个注入事件 (moment={cutoff}) 之后没有环境状态读数"
+                )
+                return window
+            window.readings = after
+            window.detail = f"依据最后事件 (moment={cutoff}) 之后的 {len(after)} 条读数"
+            for obs in after:
+                if isinstance(obs.value, dict):
+                    _merge_state(window.payload, obs.value)
             return window
 
         if moment is JudgmentMoment.ANY_TIME:
@@ -1372,6 +1541,11 @@ class TrialResult(BaseModel):
     weakest_evidence: ObservedBy | None = Field(
         None,
         description="支撑本 trial 结论的最弱证据级别 (spec: 结论必须披露最弱一级)",
+    )
+    session_diagnostics: dict[str, Any] | None = Field(
+        None,
+        description="轮级过程量 (声明/消费轮数、注入事件数、会话结束原因等) —— "
+        "只进报告诊断块, 不进通过率/pass^k/任何分母; None = 单轮任务或历史 run",
     )
 
     @property
