@@ -22,7 +22,15 @@ pip install "aeval-framework[api]"     # + REST API 服务（挂载或独立部�
 
 ## 2. 运行离线示例
 
-仓库自带一个完全离线的最小示例（Mock Agent，无需任何服务）：
+**pip 用户首跑（推荐，零 setup）**：发行包内置了一个离线可跑的示例 pack（`agent_eval.packs.starter`，随 wheel 分发）。装完即跑，不必 clone 仓库：
+
+```bash
+eval-suite run demo
+```
+
+`demo` 不是文件路径，它指向内置 starter pack（确定性 code/artifact 判据，零 LLM、零网络、零凭据，自动接内置 Mock Agent）。当前目录恰好有名为 `demo` 的本地文件/目录时本地路径优先并给出提示。
+
+**仓库示例**（需要 clone，适合看套件 YAML 长什么样）：
 
 ```bash
 git clone https://github.com/QiYuyyds/Aeval

@@ -179,7 +179,8 @@ class TestValidate:
     def test_missing_file_exit_nonzero(self, tmp_path):
         result = runner.invoke(app, ["validate", str(tmp_path / "nope.yaml")])
         assert result.exit_code != 0
-        assert "not found" in result.output
+        # 来源解析统一后, 不存在的来源由 packaging.resolve_source 报「来源不存在」
+        assert "来源不存在" in result.output
 
 
 class TestRun:

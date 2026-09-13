@@ -10,8 +10,18 @@ eval-suite <command> --help
 ## run — 执行套件
 
 ```bash
-eval-suite run <suite.yaml> [选项]
+eval-suite run <来源> [选项]
 ```
+
+**来源形态**（`run` 与 `validate` 共用同一套解析，spec: suite-distribution）：
+
+| 形态 | 示例 | 行为 |
+|------|------|------|
+| 单文件 | `eval-suite run suite.yaml` | 现状路径，直接加载（不做 pack 校验） |
+| pack 目录 | `eval-suite run packs/starter` | 按 pack 校验（`manifest.json` 逐文件 sha256），资产引用相对 pack 根解析 |
+| pack 压缩包 | `eval-suite run pack.tar.gz` / `pack.zip` | 解包到临时目录、校验顶层布局与 manifest 后加载，用后即清 |
+| git URL | `eval-suite run https://…/suite.git` | 浅 clone 到临时目录后定位套件（http/https/ssh/git/file；`file://` 可离线测试）。git 不在 PATH 时明确报错 |
+| 内置示例 | `eval-suite run demo` | 运行随 wheel 分发的 starter pack，纯 pip 安装零 setup 首跑（与本地同名路径冲突时本地优先并提示） |
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
@@ -22,8 +32,9 @@ eval-suite run <suite.yaml> [选项]
 | `--db PATH` | `./aeval.db` | 结果 SQLite 路径；也读 `AEVAL_DB` |
 | `--invalid-limit RATIO` | `0.2` | 可接受的 `invalid` trial 占比上限（`0.0`–`1.0`），超过以退出码 3 结束 |
 | `--baseline RUN_ID` | 不启用 | 基线相对回归门：run 完成后与同库中该 run 比较（语义见下文「基线门」） |
+| `--include-holdout` | 关闭 | 放行 `holdout: true` 的私有保留集任务；默认排除并在开始前打印「跳过 N 个 holdout 任务」 |
 
-行为：加载校验 suite → 装配 trace 映射与 runner → 执行 → 打印汇总（统计口径版本 / pass@k 及其区间 / pass^k / 平均分与 `worst_of_n` / `valid`·`invalid`·`pending` 分母 / 失败任务清单）。开头回显 `Trace vocabulary: NAME  spec=…  mapping=…`，即这一轮数字是按哪套埋点约定读出来的。
+行为：加载校验 suite → 装配 trace 映射与 runner → 执行 → 打印汇总（统计口径版本 / pass@k 及其区间 / pass^k / 平均分与 `worst_of_n` / `valid`·`invalid`·`pending` 分母 / 失败任务清单）。开头回显 `Trace vocabulary: NAME  spec=…  mapping=…`，即这一轮数字是按哪套埋点约定读出来的；pack 来源回显 `Source: pack '<name>' (manifest 校验通过, N 个文件)`；套件声明了 `canary_guid` 时汇总含 `Canary GUID: …` 行（未声明无此行，输出与引入前一致）。
 
 退出码（评测可信度条件**先于** agent 表现结论判定 —— 不可信的分数不参与放行）：
 
@@ -85,10 +96,10 @@ pytest --eval-suite=suite.yaml --eval-threshold=0.7 [--eval-invalid-limit=0.2]
 ## validate — 校验套件
 
 ```bash
-eval-suite validate <suite.yaml>
+eval-suite validate <来源>
 ```
 
-只做加载校验不执行。合法输出 `VALID: <name> vX — N task(s)...`；非法输出 `INVALID:` + 具体校验错误（如 `Duplicate task IDs`），退出码 1。适合放进 CI 在运行前挡格式错误。
+只做加载校验不执行；来源形态与 `run` 完全一致（单文件 / pack 目录 / pack 压缩包 / git URL，pack 形态执行与 `run` 相同的 manifest 完整性校验）。合法输出 `VALID: <name> vX — N task(s)...`；套件含 `holdout: true` 任务时额外提示「含 N 个 holdout 任务，默认运行将排除」。非法输出 `INVALID:` + 具体校验错误（如 `Duplicate task IDs`），退出码 1。适合放进 CI 在运行前挡格式错误。
 
 ## list — 列出 runs / suites
 

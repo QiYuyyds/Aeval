@@ -608,3 +608,33 @@ eval-suite run replay-suite.yaml --baseline <基线 run_id>
 
 **边界**：定时触发、告警通知、结果看板都不在框架内——调度是外部 CI 的
 职责，框架只负责一次 run 与一次门判定。
+
+## 15. 套件分发：pack 与 git URL 来源（0.5.0）
+
+套件要跨仓库/跨团队复用时，不必再"传一个 YAML + 口头约定资产"——把它做成
+**pack**（套件包）再分发。`run` 与 `validate` 的来源参数共用同一套解析
+（实现：`core/packaging.py`）：
+
+```bash
+eval-suite run packs/my-suite/               # 目录形态 = pack: 必须带 manifest.json
+eval-suite run packs/my-suite.tar.gz         # 压缩包 (.tar.gz / .zip): 解包校验, 用后即清
+eval-suite run https://github.com/you/suites.git   # git URL: 浅 clone 到临时目录后定位
+```
+
+- **manifest**（`manifest.json`）记录 pack 名、套件 semver 与逐文件 sha256；
+  任一文件被改动 → 拒绝加载并点名文件。生成：
+
+  ```bash
+  python -c "from pathlib import Path; from agent_eval.core.packaging import write_manifest; write_manifest(Path('packs/my-suite'), pack_name='my-suite')"
+  ```
+
+- **资产引用一律相对 pack 根**：绝对路径或 `..` 越界引用在解析时即拒绝
+  （`resolve_pack_asset`）——pack 要可移植，不带走打包者的本机路径。
+- **git URL**（scheme ∈ http/https/ssh/git/file）浅 clone 后在仓库内定位
+  `suite.yaml` 或 pack 根；git 不在 PATH 时给明确报错（该形态需要 git）。
+  `file://` URL 让整条链路可以离线测试。
+- 单文件 `suite.yaml` 路径不受影响：不做 pack 校验，行为与引入 pack 前一致。
+
+公开发布前请过一遍[公开发布前检查单](release-checklist.md)（canary、holdout
+拆分、许可证与数据来源声明）；字段写法见
+[YAML 格式 §公开发布卫生](yaml-format.md)。

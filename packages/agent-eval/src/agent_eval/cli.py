@@ -6,7 +6,7 @@ Commands:
                Exit 0 all passed / 1 failed tasks or baseline regression /
                3 evaluation untrustworthy. --baseline adds a relative
                regression gate against a stored run
-    validate   Validate a suite YAML without running it
+    validate   Validate a suite without running it
     list       List runs or suites from the storage DB
     show       Show one run's details (--task drills into a single task);
                reports valid/invalid/pending counts, pass@1 95% CI and
@@ -18,7 +18,19 @@ Commands:
                (--delta with an assumed or measured baseline pass rate)
     serve      Serve the standalone API (/v1) via uvicorn
 
-Runner selection (run): --runner option > AEVAL_RUNNER env var > "mock".
+Source forms (run/validate, spec: suite-distribution): a single suite.yaml
+file (status quo); a pack directory or .tar.gz/.zip archive (integrity-checked
+against manifest.json); a git URL (shallow clone into a temp dir — needs the
+git executable); or the literal "demo" (the built-in starter pack shipped
+inside the wheel; a local file/dir named demo wins with a hint). Temp dirs are
+cleaned up when the command ends.
+
+Holdout (run/validate): tasks marked holdout: true are excluded by default
+and the skip count is reported; --include-holdout runs them. validate reports
+the holdout count without running anything.
+
+Runner selection (run): --runner option > AEVAL_RUNNER env var > "mock"
+(forced "mock" for the built-in demo pack unless --runner is explicit).
 Custom runners register via the "agent_eval.runners" entry-point group
 (name → zero-arg factory returning an AgentRunner).
 
@@ -36,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime
+from pathlib import Path
 
 import typer
 
@@ -206,6 +219,24 @@ def _build_storage(db: str | None):
     return SqliteStorage(_db_path(db))
 
 
+def _resolve_suite_source_arg(source: str) -> tuple[str, str | None]:
+    """来源参数预解析: `demo` 指向内置 starter pack。
+
+    `demo` 不是文件路径; 与本地同名文件/目录冲突时本地路径优先并给出提示
+    (spec: cli 的 run demo 零 setup 语义)。
+    """
+    if source != "demo":
+        return source, None
+    if Path("demo").exists():
+        return source, (
+            "hint: 当前目录存在名为 'demo' 的本地路径, 已优先使用它 "
+            "(内置示例 pack 只在没有同名本地路径时启用)"
+        )
+    from agent_eval.core.packaging import builtin_pack_dir
+
+    return str(builtin_pack_dir("starter")), None
+
+
 def _discover_or_exit():
     """发现扩展点; 同名冲突直接退出 (不静默覆盖, spec: extension-contracts)。"""
     from agent_eval.core.discovery import ExtensionConflictError, discover_extensions
@@ -301,6 +332,8 @@ def _print_run_summary(run, verbose: bool = False) -> None:
         + (f"  Duration: {duration / 1000:.1f}s" if duration else "")
     )
     typer.echo(f"  Statistics version: {run.statistics_version or 'unknown'}")
+    if getattr(run, "canary_guid", None):
+        typer.echo(f"  Canary GUID: {run.canary_guid}")
     typer.echo(_evidence_line(run))
     for k, rate in _k_display(summary.pass_at_k):
         typer.echo(f"  Pass@{k}:  {_rate_with_ci(summary, 'estimates', k, rate)}")
@@ -365,7 +398,13 @@ def _reason_counts(reasons: dict) -> dict[str, int]:
 
 @app.command()
 def run(
-    suite_path: str = typer.Argument(..., help="Suite YAML 文件路径"),
+    suite_path: str = typer.Argument(
+        ...,
+        help=(
+            "套件来源: suite.yaml 文件 / pack 目录或 .tar.gz .zip 压缩包 / "
+            "git URL / demo (内置示例 pack)"
+        ),
+    ),
     trials: int | None = typer.Option(None, "--trials", help="覆盖每个任务的 trial 数"),
     concurrency: int | None = typer.Option(
         None, "--concurrency", min=1, help="trial 并发数 (默认串行)"
@@ -373,8 +412,10 @@ def run(
     runner: str | None = typer.Option(
         None,
         "--runner",
-        envvar="AEVAL_RUNNER",
-        help="AgentRunner 名称 (内置 mock, 或 agent_eval.runners entry-point 注册名)",
+        help=(
+            "AgentRunner 名称 (内置 mock, 或 agent_eval.runners entry-point 注册名); "
+            "缺省读 AEVAL_RUNNER 环境变量, 再缺省为 mock"
+        ),
     ),
     vocabulary: str = typer.Option(
         VOCABULARY_OTEL_GENAI,
@@ -409,6 +450,14 @@ def run(
             "区间重叠或优于基线 → 退出码 0"
         ),
     ),
+    include_holdout: bool = typer.Option(
+        False,
+        "--include-holdout",
+        help=(
+            "放行 holdout 任务 (默认排除并在开始前报告跳过数; "
+            "私有保留集只在显式放行时运行)"
+        ),
+    ),
 ) -> None:
     """加载并执行 suite, 打印汇总。
 
@@ -416,156 +465,200 @@ def run(
     显著变差/不可比/不可判; 2 用法错误; 3 评测本身不可信 (invalid 超阈或
     关键统计量为 insufficient_data)。
     """
-    from agent_eval.core.runner import EvalRunner
+    from agent_eval.core.packaging import PackError, resolve_source
+    from agent_eval.core.runner import EvalRunner, NoRunnableTasksError
     from agent_eval.core.suite import SuiteLoadError, load_suite
     from agent_eval.trace.mapping import default_mapping
 
+    source_arg, demo_hint = _resolve_suite_source_arg(suite_path)
+    if demo_hint:
+        typer.echo(demo_hint)
+    is_demo = suite_path == "demo"
+
     try:
-        suite = load_suite(suite_path)
-    except SuiteLoadError as e:
+        source = resolve_source(source_arg)
+    except PackError as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(code=1) from None
 
-    if trials is not None and trials < 1:
-        typer.echo("error: --trials must be >= 1", err=True)
-        raise typer.Exit(code=2)
-
-    # 装配期就把词汇定死: 拼错的预设必须失败, 静默退回默认表会跑出一整轮
-    # 「看似正常、实则全是证据缺失」的观测, 比直接报错难查得多。
     try:
-        trace_mapping = default_mapping(vocabulary=vocabulary)
-    except ValueError as e:
-        typer.echo(f"error: {e}", err=True)
-        raise typer.Exit(code=2) from None
+        try:
+            suite = load_suite(source.suite_path)
+        except SuiteLoadError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(code=1) from None
 
-    max_trials = trials or max(t.max_trials for t in suite.tasks)
-    typer.echo(
-        f"Starting eval run: {suite.name} v{suite.version} "
-        f"({len(suite.tasks)} tasks, up to {max_trials} trials each)"
-    )
-    typer.echo(
-        f"Trace vocabulary: {vocabulary}  spec={trace_mapping.spec_version}  "
-        f"mapping={trace_mapping.version}"
-    )
-
-    agent_runner = _resolve_agent_runner(runner)
-    storage = _build_storage(db)
-    registry = _discover_or_exit()
-    environment = _resolve_environment(suite, registry)
-
-    # 内置指标注册表同源装配 (与 metric grader / 诊断指标同一注入约定):
-    # llm_fn 未配置时被引用的 LLM 指标返回明确配置错误, 不 crash run
-    from agent_eval.metrics import build_default_metrics_registry
-
-    eval_runner = EvalRunner(
-        agent_runner=agent_runner,
-        trace_provider=_trace_provider_for(agent_runner),
-        storage=storage,
-        trace_mapping=trace_mapping,
-        metrics_registry=build_default_metrics_registry(),
-        environment=environment,
-        extensions=registry,
-        **({"concurrency": concurrency} if concurrency else {}),
-    )
-
-    async def _execute():
-        await storage.initialize()
-        counter = {"n": 0}
-
-        async def _progress(event: str, data: dict) -> None:
-            if event == "task_complete":
-                counter["n"] += 1
-                total = data.get("trials", 0)
-                rate = data.get("pass_rate")
-                if rate is None:
-                    detail = (
-                        f"{data.get('valid_trials', 0)}/{total} valid trials "
-                        f"(invalid={data.get('invalid_trials', 0)}, "
-                        f"pending={data.get('pending_trials', 0)}) "
-                        "-> insufficient evidence"
-                    )
-                else:
-                    valid = data.get("valid_trials", total)
-                    detail = f"{round(rate * valid)}/{valid} valid trials passed"
-                typer.echo(f"  [{counter['n']}/{len(suite.tasks)}] "
-                           f"{data.get('task_id', '?')}: {detail}")
-
-        return await eval_runner.run_suite(suite, callback=_progress)
-
-    run_result = asyncio.run(_execute())
-
-    if run_result.status != "completed":
-        typer.echo(f"error: run ended with status '{run_result.status}': "
-                   f"{run_result.error}", err=True)
-        raise typer.Exit(code=1)
-
-    _print_run_summary(run_result, verbose=verbose)
-
-    summary = run_result.summary
-    if summary is None:
-        raise typer.Exit(code=1)
-
-    # 基线相对门 (opt-in): 与绝对阈值门同量 (套件实测 pass@1), 同一比较语义
-    # (core.comparison.compare_baseline — 与 API compare / pytest 插件三处同源)。
-    # 诊断块先行打印; 门判定在可信度与任务失败之后 (失败原因要能叠加呈现)。
-    baseline_gate_failed = False
-    if baseline is not None:
-        from agent_eval.core.comparison import (
-            BASELINE_GATE_FAILURES,
-            compare_baseline,
-            format_baseline_report,
-        )
-
-        baseline_run = asyncio.run(_get_run(storage, baseline))
-        if baseline_run is None:
-            typer.echo(
-                f"error: baseline run '{baseline}' not found in {_db_path(db)}", err=True
-            )
+        if trials is not None and trials < 1:
+            typer.echo("error: --trials must be >= 1", err=True)
             raise typer.Exit(code=2)
 
-        comparison = compare_baseline(run_result, baseline_run)
-        typer.echo("")
-        for line in format_baseline_report(comparison):
-            typer.echo(line)
-        if comparison.verdict in BASELINE_GATE_FAILURES:
-            baseline_gate_failed = True
+        # 装配期就把词汇定死: 拼错的预设必须失败, 静默退回默认表会跑出一整轮
+        # 「看似正常、实则全是证据缺失」的观测, 比直接报错难查得多。
+        try:
+            trace_mapping = default_mapping(vocabulary=vocabulary)
+        except ValueError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(code=2) from None
 
-    # 评测可信度条件先于 agent 表现结论 (不可信的分数不参与放行判定)
-    reliability_problems: list[str] = []
-    if summary.total_trials:
-        ratio = (summary.invalid_trials or 0) / summary.total_trials
-        if ratio > invalid_limit:
-            reliability_problems.append(
-                f"invalid trial ratio {ratio:.2f} exceeds --invalid-limit {invalid_limit:.2f}"
-            )
-    for ts in summary.task_summaries:
-        if _pass1(ts) is None:
-            reliability_problems.append(
-                f"task '{ts.task_id}': pass@1 is {INSUFFICIENT_LABEL} "
-                f"(valid={ts.valid_trials}, invalid={ts.invalid_trials}, "
-                f"pending={len(ts.pending_trials)})"
-            )
-    if _pass1(summary) is None:
-        reliability_problems.append(f"run-level pass@1 is {INSUFFICIENT_LABEL}")
+        runnable_tasks = [
+            t for t in suite.tasks if include_holdout or not t.holdout
+        ]
+        holdout_count = len(suite.tasks) - len(runnable_tasks)
 
-    if reliability_problems:
-        typer.echo("")
-        typer.echo(
-            "NOT PASSABLE - evaluation reliability problem (not an agent performance result):"
+        # demo 的承诺是「装完即跑出完整报告」: 未显式指 --runner 时强制 mock,
+        # 不吃 AEVAL_RUNNER 环境变量 (显式旗标仍然生效)
+        resolved_runner = (
+            runner if runner is not None else ("mock" if is_demo else None)
         )
-        for problem in reliability_problems:
-            typer.echo(f"  - {problem}")
-        typer.echo(
-            "  Check the grader/judge configuration; these trials produced no valid verdict."
+
+        if runnable_tasks:
+            max_trials = trials or max(t.max_trials for t in runnable_tasks)
+            typer.echo(
+                f"Starting eval run: {suite.name} v{suite.version} "
+                f"({len(runnable_tasks)} tasks, up to {max_trials} trials each)"
+            )
+            if holdout_count:
+                typer.echo(
+                    f"跳过 {holdout_count} 个 holdout 任务 "
+                    "(默认排除; 用 --include-holdout 放行)"
+                )
+            if source.manifest is not None:
+                typer.echo(
+                    f"Source: pack '{source.pack_name}' "
+                    f"(manifest 校验通过, {len(source.manifest['files'])} 个文件)"
+                )
+            typer.echo(
+                f"Trace vocabulary: {vocabulary}  spec={trace_mapping.spec_version}  "
+                f"mapping={trace_mapping.version}"
+            )
+
+        agent_runner = _resolve_agent_runner(resolved_runner)
+        storage = _build_storage(db)
+        registry = _discover_or_exit()
+        environment = _resolve_environment(suite, registry)
+
+        # 内置指标注册表同源装配 (与 metric grader / 诊断指标同一注入约定):
+        # llm_fn 未配置时被引用的 LLM 指标返回明确配置错误, 不 crash run
+        from agent_eval.metrics import build_default_metrics_registry
+
+        eval_runner = EvalRunner(
+            agent_runner=agent_runner,
+            trace_provider=_trace_provider_for(agent_runner),
+            storage=storage,
+            trace_mapping=trace_mapping,
+            metrics_registry=build_default_metrics_registry(),
+            environment=environment,
+            extensions=registry,
+            **({"concurrency": concurrency} if concurrency else {}),
         )
-        raise typer.Exit(code=3)
 
-    if summary.failures:
-        raise typer.Exit(code=1)
+        async def _execute():
+            await storage.initialize()
+            counter = {"n": 0}
 
-    if baseline_gate_failed:
-        # 显著变差 / 不可比 / 不可判: 基线门不放行 (宁可红不可哑)
-        raise typer.Exit(code=1)
+            async def _progress(event: str, data: dict) -> None:
+                if event == "task_complete":
+                    counter["n"] += 1
+                    total = data.get("trials", 0)
+                    rate = data.get("pass_rate")
+                    if rate is None:
+                        detail = (
+                            f"{data.get('valid_trials', 0)}/{total} valid trials "
+                            f"(invalid={data.get('invalid_trials', 0)}, "
+                            f"pending={data.get('pending_trials', 0)}) "
+                            "-> insufficient evidence"
+                        )
+                    else:
+                        valid = data.get("valid_trials", total)
+                        detail = f"{round(rate * valid)}/{valid} valid trials passed"
+                    typer.echo(f"  [{counter['n']}/{len(runnable_tasks)}] "
+                               f"{data.get('task_id', '?')}: {detail}")
+
+            return await eval_runner.run_suite(
+                suite, callback=_progress, include_holdout=include_holdout
+            )
+
+        try:
+            run_result = asyncio.run(_execute())
+        except NoRunnableTasksError as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(code=1) from None
+
+        if run_result.status != "completed":
+            typer.echo(f"error: run ended with status '{run_result.status}': "
+                       f"{run_result.error}", err=True)
+            raise typer.Exit(code=1)
+
+        _print_run_summary(run_result, verbose=verbose)
+
+        summary = run_result.summary
+        if summary is None:
+            raise typer.Exit(code=1)
+
+        # 基线相对门 (opt-in): 与绝对阈值门同量 (套件实测 pass@1), 同一比较语义
+        # (core.comparison.compare_baseline — 与 API compare / pytest 插件三处同源)。
+        # 诊断块先行打印; 门判定在可信度与任务失败之后 (失败原因要能叠加呈现)。
+        baseline_gate_failed = False
+        if baseline is not None:
+            from agent_eval.core.comparison import (
+                BASELINE_GATE_FAILURES,
+                compare_baseline,
+                format_baseline_report,
+            )
+
+            baseline_run = asyncio.run(_get_run(storage, baseline))
+            if baseline_run is None:
+                typer.echo(
+                    f"error: baseline run '{baseline}' not found in {_db_path(db)}", err=True
+                )
+                raise typer.Exit(code=2)
+
+            comparison = compare_baseline(run_result, baseline_run)
+            typer.echo("")
+            for line in format_baseline_report(comparison):
+                typer.echo(line)
+            if comparison.verdict in BASELINE_GATE_FAILURES:
+                baseline_gate_failed = True
+
+        # 评测可信度条件先于 agent 表现结论 (不可信的分数不参与放行判定)
+        reliability_problems: list[str] = []
+        if summary.total_trials:
+            ratio = (summary.invalid_trials or 0) / summary.total_trials
+            if ratio > invalid_limit:
+                reliability_problems.append(
+                    f"invalid trial ratio {ratio:.2f} exceeds --invalid-limit {invalid_limit:.2f}"
+                )
+        for ts in summary.task_summaries:
+            if _pass1(ts) is None:
+                reliability_problems.append(
+                    f"task '{ts.task_id}': pass@1 is {INSUFFICIENT_LABEL} "
+                    f"(valid={ts.valid_trials}, invalid={ts.invalid_trials}, "
+                    f"pending={len(ts.pending_trials)})"
+                )
+        if _pass1(summary) is None:
+            reliability_problems.append(f"run-level pass@1 is {INSUFFICIENT_LABEL}")
+
+        if reliability_problems:
+            typer.echo("")
+            typer.echo(
+                "NOT PASSABLE - evaluation reliability problem (not an agent performance result):"
+            )
+            for problem in reliability_problems:
+                typer.echo(f"  - {problem}")
+            typer.echo(
+                "  Check the grader/judge configuration; these trials produced no valid verdict."
+            )
+            raise typer.Exit(code=3)
+
+        if summary.failures:
+            raise typer.Exit(code=1)
+
+        if baseline_gate_failed:
+            # 显著变差 / 不可比 / 不可判: 基线门不放行 (宁可红不可哑)
+            raise typer.Exit(code=1)
+    finally:
+        # git clone / 压缩包解包的临时目录用后即清 (本地文件/目录来源为空操作)
+        source.cleanup()
 
 
 # ─── validate ────────────────────────────────────────────────────────────────
@@ -573,21 +666,43 @@ def run(
 
 @app.command()
 def validate(
-    suite_path: str = typer.Argument(..., help="Suite YAML 文件路径"),
+    suite_path: str = typer.Argument(
+        ...,
+        help=(
+            "套件来源: suite.yaml 文件 / pack 目录或 .tar.gz .zip 压缩包 / "
+            "git URL (pack 形态执行与 run 相同的 manifest 校验)"
+        ),
+    ),
 ) -> None:
     """只做加载校验: 输出结论, 校验失败退出码非 0。"""
+    from agent_eval.core.packaging import PackError, resolve_source
     from agent_eval.core.suite import SuiteLoadError, load_suite
 
     try:
-        suite = load_suite(suite_path)
-    except SuiteLoadError as e:
+        source = resolve_source(suite_path)
+    except PackError as e:
         typer.echo(f"INVALID: {e}", err=True)
         raise typer.Exit(code=1) from None
 
-    typer.echo(
-        f"VALID: {suite.name} v{suite.version} — {len(suite.tasks)} task(s), "
-        f"{sum(len(t.graders) for t in suite.tasks)} grader config(s)"
-    )
+    try:
+        try:
+            suite = load_suite(source.suite_path)
+        except SuiteLoadError as e:
+            typer.echo(f"INVALID: {e}", err=True)
+            raise typer.Exit(code=1) from None
+
+        typer.echo(
+            f"VALID: {suite.name} v{suite.version} — {len(suite.tasks)} task(s), "
+            f"{sum(len(t.graders) for t in suite.tasks)} grader config(s)"
+        )
+        holdout_count = sum(1 for t in suite.tasks if t.holdout)
+        if holdout_count:
+            typer.echo(
+                f"注意: 含 {holdout_count} 个 holdout 任务, 默认运行将排除 "
+                "(--include-holdout 放行)"
+            )
+    finally:
+        source.cleanup()
 
 
 # ─── list ────────────────────────────────────────────────────────────────────
@@ -676,6 +791,8 @@ def show(
         return
 
     typer.echo(f"Statistics version: {run.statistics_version or 'unknown'}")
+    if getattr(run, "canary_guid", None):
+        typer.echo(f"Canary GUID: {run.canary_guid}")
     typer.echo(_evidence_line(run))
     for k, rate in _k_display(summary.pass_at_k):
         typer.echo(f"  Pass@{k}:  {_rate_with_ci(summary, 'estimates', k, rate)}")

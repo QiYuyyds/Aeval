@@ -60,6 +60,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_eval"]
+# src/agent_eval/packs/** (含 starter pack 的 suite.yaml/manifest.json) 作为
+# package data 随 wheel 分发 —— `eval-suite run demo` 的零 setup 首跑依赖它;
+# 仓库 packs/starter/ 与之同源, tests/test_packaging.py 钉住两侧一致。
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

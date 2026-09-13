@@ -227,6 +227,14 @@ class RegradeUnavailable(RuntimeError):
     """该 run 不能重新评分 —— 说清为什么, 而不是静默产出一个新结论。"""
 
 
+class NoRunnableTasksError(ValueError):
+    """过滤掉 holdout 任务后没有可运行的任务: 拒绝运行, 不产出空 run。
+
+    空 run 的分母语义是「证据不足」, 不拿来吞整份配置错误 —— 全 holdout
+    套件要跑就用 ``--include-holdout`` / ``include_holdout=True`` 显式放行。
+    """
+
+
 class IncompleteEvidence(RegradeUnavailable):
     """证据不完整: 残缺证据上重评只会产出另一个错的东西, 原结论保持不变。"""
 
@@ -413,6 +421,8 @@ class EvalRunner:
         suite: EvalSuite,
         callback: ProgressCallback | None = None,
         run_id: str | None = None,
+        *,
+        include_holdout: bool = False,
     ) -> RunResult:
         """
         执行整个 suite。
@@ -421,13 +431,28 @@ class EvalRunner:
             suite: 评测套件
             callback: 进度回调 (用于 SSE 推送)
             run_id: 指定 run ID (API 层预生成, 便于启动即返回)
+            include_holdout: 是否放行 holdout 任务 (默认排除; spec: suite-distribution
+                的默认排除语义)。排除只影响执行, 不影响加载与校验。
 
         Returns:
             RunResult: 完整运行结果
+
+        Raises:
+            NoRunnableTasksError: 过滤 holdout 后没有可运行的任务 (拒绝产出空 run)
         """
+        runnable = [
+            task for task in suite.tasks if include_holdout or not task.holdout
+        ]
+        if not runnable:
+            raise NoRunnableTasksError(
+                "过滤后无任务可运行: 套件的全部任务都标记了 holdout=true, 默认运行 "
+                "不包含任何任务 (空 run 不是配置错误的出口)。确认要运行私有保留集 "
+                "请用 --include-holdout (CLI) 或 include_holdout=True (库层) 显式放行"
+            )
         run = RunResult(
             run_id=run_id or f"run_{uuid.uuid4().hex[:12]}",
             suite_name=suite.name,
+            canary_guid=suite.canary_guid,
             status="running",
             started_at=time.time() * 1000,
             statistics_version=STATISTICS_VERSION,
@@ -440,7 +465,7 @@ class EvalRunner:
             await self.storage.save_suite(suite)
             await self.storage.save_run(run)
 
-            for task_original in suite.tasks:
+            for task_original in runnable:
                 # suite 级 reward_basis 下渗为 task 生效值 (不改调用方的套件对象)
                 task = self._effective_task(task_original, suite)
                 if self._cancel_flags.get(run.run_id, False):
@@ -491,8 +516,9 @@ class EvalRunner:
                     "pass_rate": pass_rate,
                 })
 
-            # 证据边界随 run 落盘 (复核时不必再猜当时的采集与翻译口径)
-            run.evidence = self._evidence_boundary(suite, unrecognized)
+            # 证据边界随 run 落盘 (复核时不必再猜当时的采集与翻译口径)。
+            # 被排除的 holdout 任务不在这里产生任何条目 —— 不在场, 不是零。
+            run.evidence = self._evidence_boundary(suite, runnable, unrecognized)
             # 计算汇总
             run.summary = self._compute_summary(run, suite)
             run.status = "cancelled" if self._cancel_flags.get(run.run_id, False) else "completed"
@@ -508,7 +534,7 @@ class EvalRunner:
         finally:
             self._cancel_flags.pop(run.run_id, None)
             if run.evidence is None:
-                run.evidence = self._evidence_boundary(suite, unrecognized)
+                run.evidence = self._evidence_boundary(suite, runnable, unrecognized)
             # 所有退出路径 (含启动阶段被取消) 都落盘最终状态
             run.completed_at = time.time() * 1000
             await self.storage.save_run(run)
@@ -704,11 +730,16 @@ class EvalRunner:
     def _evidence_boundary(
         self,
         suite: EvalSuite,
+        tasks: list[EvalTask],
         unrecognized: set[str],
     ) -> EvidenceBoundary:
-        """本次 run 的证据采集边界: 采集声明 + 翻译口径 + 脱敏处理身份 + 环境身份。"""
+        """本次 run 的证据采集边界: 采集声明 + 翻译口径 + 脱敏处理身份 + 环境身份。
+
+        ``tasks`` 传**本次实际运行**的任务 (run_suite 已按 holdout 过滤):
+        被排除的任务在边界里同样不产生条目, 与「不在场」的排除语义一致。
+        """
         identifier, version = describe_redactor(self.redactor)
-        per_task = {task.id: suite.resolved_capture(task) for task in suite.tasks}
+        per_task = {task.id: suite.resolved_capture(task) for task in tasks}
         env_identity, env_version = self._environment_identity()
         return EvidenceBoundary(
             capture_tool_arguments=any(d.tool_arguments for d in per_task.values()),
@@ -717,7 +748,7 @@ class EvalRunner:
             capture_content_by_task={k: d.model_content for k, d in per_task.items()},
             subject_allowed={
                 f"{task.id}/{g.name}": True
-                for task in suite.tasks
+                for task in tasks
                 for g in task.graders
                 if g.allow_subject
             },

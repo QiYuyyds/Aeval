@@ -527,6 +527,11 @@ class EvalTask(BaseModel):
     difficulty: Literal["easy", "medium", "hard"] | None = Field(
         None, description="难度标注 (仅呈现, 不参与计分)"
     )
+    holdout: bool = Field(
+        False,
+        description="私有保留集标记 (True = 默认运行被排除, 需 --include-holdout 显式放行); "
+        "仅布尔校验, 不与难度/类别等呈现字段做任何联动",
+    )
 
     # ── 预算与效率 (只用于终止与归类, 不改变计分方式) ──
     optimal_steps: int | None = Field(
@@ -674,6 +679,12 @@ class EvalSuite(BaseModel):
     )
     tasks: list[EvalTask] = Field(..., min_length=1, description="任务列表")
     metadata: dict[str, Any] = Field(default_factory=dict, description="自定义元数据")
+    canary_guid: str | None = Field(
+        None,
+        description="基准污染检测 canary GUID (声明时必须为 UUID 格式, 非法即加载失败); "
+        "随 run 输出与运行记录如实呈现, 框架不做运行时强制 —— 未声明不报错不告警, "
+        "发布卫生由公开发布前检查单承载",
+    )
     capture: CapturePolicy = Field(
         default_factory=CapturePolicy,
         description="suite 级敏感证据采集声明 (默认全关; task 级可逐字段覆盖)",
@@ -702,6 +713,22 @@ class EvalSuite(BaseModel):
         if len(v) > 128:
             raise ValueError("Suite name too long (max 128 chars)")
         return v
+
+    @field_validator("canary_guid")
+    @classmethod
+    def _validate_canary_guid(cls, v: str | None) -> str | None:
+        """canary GUID 只做 UUID 格式校验 (声明了就必须是合法 UUID, 否则加载失败)。"""
+        if v is None:
+            return v
+        try:
+            uuid.UUID(str(v))
+        except (ValueError, AttributeError, TypeError):
+            raise ValueError(
+                f"canary_guid 必须是 UUID 格式 (got {v!r}); 生成方式: "
+                'python -c "import uuid; print(uuid.uuid4())"。未声明 (省略该字段) '
+                "即不做污染检测留痕, 不会报错"
+            ) from None
+        return str(v)
 
     @model_validator(mode="after")
     def _validate_task_ids_unique(self) -> EvalSuite:
@@ -1776,6 +1803,11 @@ class RunResult(BaseModel):
 
     run_id: str = Field(default_factory=lambda: f"run_{uuid.uuid4().hex[:12]}")
     suite_name: str = ""
+    canary_guid: str | None = Field(
+        None,
+        description="套件声明的污染检测 canary GUID (随运行记录呈现, 供公开发布后溯源); "
+        "None = 套件未声明或历史 run",
+    )
     status: Literal["pending", "running", "completed", "failed", "cancelled"] = "pending"
     started_at: float = Field(default_factory=lambda: time.time() * 1000)
     completed_at: float | None = None

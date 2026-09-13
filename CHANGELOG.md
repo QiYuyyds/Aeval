@@ -31,6 +31,13 @@ Aeval 的版本语义变更记录。格式遵循 [Keep a Changelog](https://keep
 - **生产 trace 回放通路（文档 + 离线示例）**：[接入指南 §14](docs/integration-guide.md) 写明 trace 导出 → `trace_mining` 建任务 → 人工补判据 → 套件化 → `eval-suite run --baseline` 定时回归的全通路与边界（不做在线服务）；`examples/trace-replay/` 提供全程离线的最小演示。
 - 不传新参数时 `run` / pytest 插件行为与 0.3.x 逐字节一致；`statistics_version` 不变（功效分析是报告量与门禁行为，不改分母口径）。
 
+### 新增（变更⑦ add-suite-packaging-and-hygiene，目标 0.5.0）
+
+- **套件包（pack）与来源解析**：`eval-suite run` / `validate` 的来源参数从"本地 YAML 路径"扩展为四类——单文件（现状原样）、pack 目录、pack 压缩包（`.tar.gz` / `.zip`，解包校验用后即清）、git URL（浅 clone 到临时目录后定位，`file://` 全链路离线可测；git 缺失给明确报错）。pack 由 `suite.yaml` + 引用资产 + `manifest.json`（pack 名 / 套件 semver / 逐文件 sha256）构成：任一文件被改动即拒绝加载并点名文件，manifest 缺失/非法同样拒绝；pack 内资产引用相对 pack 根解析，越界/绝对路径引用即拒（新模块 `core/packaging.py`，标准库实现零新依赖）。
+- **内置 starter pack 随 wheel 分发**：`agent_eval.packs.starter`（确定性 code/artifact 判据，零 LLM 零网络零凭据）打包进 wheel 作 package data；`eval-suite run demo` 直接运行它——pip 用户装完即跑，不必 clone 仓库（与本地同名路径冲突时本地优先并提示；未显式传 `--runner` 时强制内置 mock）。仓库侧 `packs/starter/` 与包内同源，测试钉住两侧逐字节一致。
+- **污染卫生**：suite 新增规范字段 `canary_guid`（UUID 格式校验，随 run 输出与运行记录呈现；框架不做运行时强制）与任务标记 `holdout: true`——默认不跑（`run` 排除并报告跳过数），`--include-holdout` 显式放行；过滤在 `EvalRunner.run_suite` 入口完成，REST 与宿主挂载自动同享；全 holdout 套件报错拒绝运行（不产出空 run）；跳过数不进 RunSummary（统计口径零变更，`statistics_version` 不动）。`docs/release-checklist.md` 新增公开发布前检查单（canary 生成与用途、holdout 拆分、许可证与数据来源声明、pack 发布方式）。
+- **破坏性**：无。单文件路径加载、无 holdout 套件的运行、未声明 `canary_guid` 的套件三条现状路径行为逐字节一致（各有回归测试钉住）；唯一新增 pip 依赖为零，git 为可选外部命令。
+
 ## [0.2.0] — 2026-09-06
 
 ### 变更
