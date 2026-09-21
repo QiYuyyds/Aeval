@@ -41,3 +41,18 @@
 - [x] 7.2 CLI e2e：来源四形态（单文件/目录/压缩包/file:// git URL）+ holdout 三路径 + `run demo`，全部离线通过
 - [x] 7.3 零漂移：不含新字段的既有套件在 run/validate 下的输出与引入前逐字节一致（回归测试钉住）
 - [x] 7.4 `openspec validate add-suite-packaging-and-hygiene --strict` 通过；CHANGELOG Unreleased 段追加本变更条目
+
+> **归档附记（2026-09-21）**：并入主 spec 前逐条把规范文本对到了实现上，三处改准 ——
+> ① pack「其引用的本地资产」被去掉：`resolve_pack_asset` / `resolve_asset` 在生产加载路径上零调用方
+> （CLI 只把 `suite_path` 交给 `load_suite`），改为只声明已实现的边界属性「资产引用不得逃出 pack 根」；
+> ② 压缩包形态收窄到 `.tar.gz` / `.tgz` / `.zip`（`_ARCHIVE_SUFFIXES`），其余扩展名按单文件路径处理；
+> ③ starter pack 不再声称已在「仅 pip 安装、无仓库 checkout」形态下实测（现有测试只在仓库树内 chdir，
+> 无构建产物断言），并把 `run demo` 强制使用内置确定性被评方这一实际行为写进规范。
+> 另补一条新需求，把已实现却无人记录的六种拒绝形态钉住（清单双向不一致、semver 与 suite.yaml 不符、
+> 压缩包成员越界、嵌套 pack 根、clone 内多个 `suite.yaml`、全 holdout 套件），并把 canary_guid 的
+> 「未声明逐字节一致」限定到命令行输出 —— 持久化记录与 API 里该键恒在、未声明时为 null。
+>
+> **两个未修的完整性缺口，留作后续变更（不当作已满足写进规范）**：
+> ① git URL 来源若 clone 结果里没有 manifest，会静默退回单文件路径加载，绕过完整性校验；
+> ② clone 内未被 manifest 列出的 `suite.yaml` 同样不经校验。两者都属于「看起来在校验、实际没校」。
+> 另有一处测试缺口：`validate` 对被篡改 pack 的端到端行为只由 `verify_pack` 的单元测试覆盖，无 CLI e2e。

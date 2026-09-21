@@ -35,7 +35,9 @@ context: |
 
   能力词表（flat kebab-case，capability 路径与模块对齐，勿另造同义词）：
   suite-format, extension-contracts, orchestration, statistics, graders, llm-metrics, dataset,
-  storage, trace-provider, rest-api, cli, dashboard
+  storage, trace-provider, rest-api, cli, dashboard, suite-distribution
+  注：dataset 目前在词表内但 openspec/specs/dataset/ 尚未建立（尚无归档变更为其声明需求）——保留词条，
+  不要因目录缺失而删词，也不要在没有 spec 文件时假装它已定义。
   注：openspec/specs/ 自 v0.3.0 起由首个归档变更逐步填充；后续提案复用已有路径，不新增域层级。
 
   验证门：cd packages/agent-eval && pytest tests/ -q ；ruff check packages/agent-eval ；
