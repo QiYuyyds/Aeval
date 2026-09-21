@@ -31,10 +31,11 @@ Aeval 的任务模型锁死在「一条静态 prompt」。③ 把 `run()` 换成
 
 - `extension-contracts`：新增 `UserSimulator` 协议与 `TrialSession` 的轮次/事件钩子；扩展点发现注册表；「协议演进不保留双路径」约束本轮的规避方式（见设计 D1）。
 - `suite-format`：`conversation` 任务维度与事件脚本声明；`prompt` 语义收窄为首轮输入。
-- `orchestration`：会话驱动的执行循环、多轮 trial 的取消与预算边界、事件流的落盘与离线重放。
+- `orchestration`：会话驱动的执行循环（结束原因为轮数用尽 / 目标达成 / 模拟器无更多话术）、事件流的落盘与离线重放。
 - `graders`：判定时刻枚举新增「事件后状态」；自定义判据按名声明与发现后的可用性。
 - `storage`：证据边界须记录环境身份，使跨 run 比较能声明「同一环境」。
 - `cli`：`eval-suite run` 装配时注入发现到的自定义判据/环境/模拟器，并与 REST 一致可见。
+- `rest-api`：能力清单声明本次部署是否具备用户模拟与运行中事件注入，使客户端提交前就能判断。
 
 ## Impact
 
