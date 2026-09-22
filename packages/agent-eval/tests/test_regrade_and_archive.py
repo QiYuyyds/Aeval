@@ -26,6 +26,7 @@ from agent_eval.core.types import (
     CapturePolicy,
     EvalSuite,
     EvalTask,
+    GradeAttempt,
     GraderConfig,
     GraderResult,
     GraderType,
@@ -37,6 +38,7 @@ from agent_eval.core.types import (
     TrialVerdict,
 )
 from agent_eval.examples.mock_runner import MockAgentRunner, MockTraceProvider
+from agent_eval.graders.state_check import StateCheckGrader
 from agent_eval.storage.memory import MemoryStorage
 from agent_eval.storage.sqlite import SqliteStorage
 from agent_eval.trace.mapping import (
@@ -382,6 +384,189 @@ async def test_summary_counts_only_the_current_verdict():
     assert drift["flipped_trials"] == 1
     assert drift["flip_rate"] == pytest.approx(1.0)
     assert drift["attempts"] == 3
+
+
+# ── 翻判归因: 哪一根口径轴变了 (change make-judge-prompt-deterministic, design D6) ──
+
+
+async def _append_regrade_attempt(
+    runner, run, task_id: str, trial_index: int, *, success=None, grader_versions=None,
+    without_results: bool = False,
+):
+    """在既有 attempt 旁并列追加一条重评结论, 只改动指定的那几个口径字段。"""
+    base = (await runner.storage.list_grade_attempts(run.run_id, task_id, trial_index))[-1]
+    trial = base.trial
+    if success is not None:
+        trial = trial.model_copy(update={"success": success})
+    if without_results:
+        trial = trial.model_copy(update={"grader_results": []})
+    await runner.storage.save_grade_attempt(
+        GradeAttempt(
+            run_id=base.run_id,
+            task_id=base.task_id,
+            trial_index=base.trial_index,
+            triggered_by="regrade",
+            trial=trial,
+            grader_versions=grader_versions if grader_versions is not None else base.grader_versions,
+            mapping_version=base.mapping_version,
+            spec_version=base.spec_version,
+            statistics_version=base.statistics_version,
+            judge_models=base.judge_models,
+        )
+    )
+
+
+def _bump(versions: dict[str, str], name: str, to: str) -> dict[str, str]:
+    return {**versions, name: to}
+
+
+class BumpingStateGrader:
+    """判分与内置 state_check 完全一致, 只有实现版本会换代 —— 换代归因的样本。"""
+
+    name = "bumping_state"
+    implementation_version = "1"
+
+    def __init__(self) -> None:
+        self._inner = StateCheckGrader()
+
+    @property
+    def evidence_levels(self):
+        return self._inner.evidence_levels
+
+    async def grade(self, trial, spans, task, context=None):
+        result = await self._inner.grade(trial, spans, task, context=context)
+        return result.model_copy(
+            update={
+                # 归因轴从 grader_name 反推参与者: 沿用内层的名字会让这条结论读到
+                # 另一个评分器的版本, 而不是它自己的
+                "grader_name": self.name,
+                "details": {**result.details, "grader_version": self.implementation_version},
+            }
+        )
+
+
+async def test_flips_name_the_grader_version_axis():
+    """Scenario: 评分器换代是唯一变化 —— 归因直接点名, 不需人工逐字段比对。"""
+    runner, run = await collected_run()
+    base = (await runner.storage.list_grade_attempts(run.run_id, "t1", 0))[0]
+    assert "state_check" in base.grader_versions and "code_based" in base.grader_versions
+
+    await _append_regrade_attempt(
+        runner,
+        run,
+        "t1",
+        0,
+        success=False,
+        grader_versions=_bump(base.grader_versions, "state_check", "3"),
+    )
+    drift = await runner.verdict_drift(run.run_id)
+
+    assert drift["flipped_trials"] == 1
+    assert drift["differing_caliber_axes"] == ["grader_versions"]
+    assert drift["unattributable_flips"] is False
+    # 计数不再是"口径相同"的意思: 第五根轴并入后同一批数据会报 2
+    assert drift["distinct_calibers"] == 2
+
+
+async def test_uninvolved_grader_upgrade_does_not_move_any_axis():
+    """Scenario: 无关评分器改版不污染归因 —— 本 trial 只由一个评分器判定。"""
+    runner, run = await collected_run()
+    base = (await runner.storage.list_grade_attempts(run.run_id, "t1", 0))[0]
+
+    # 唯一改动的是没参与本次判定的评分器: 归因不得因此出现差异轴
+    await _append_regrade_attempt(
+        runner,
+        run,
+        "t1",
+        0,
+        grader_versions=_bump(base.grader_versions, "code_based", "99"),
+    )
+    drift = await runner.verdict_drift(run.run_id)
+    assert drift["differing_caliber_axes"] == []
+    assert drift["distinct_calibers"] == 1
+
+    # 参与判定的那个改了 → 只点名 grader_versions 这一根轴, 与它无关的那八个不算
+    await _append_regrade_attempt(
+        runner,
+        run,
+        "t1",
+        1,
+        success=False,
+        grader_versions=_bump(base.grader_versions, "state_check", "3"),
+    )
+    drift = await runner.verdict_drift(run.run_id)
+    assert drift["differing_caliber_axes"] == ["grader_versions"]
+    assert drift["flipped_trials"] == 1
+
+
+async def test_flip_with_identical_calibers_is_reported_as_unattributable():
+    """Scenario: 全部口径轴相同而结论仍翻转 → 显式报告, 不得由 =1 暗示无害。"""
+    runner, run = await collected_run()
+
+    await _append_regrade_attempt(runner, run, "t1", 0, success=False)
+    drift = await runner.verdict_drift(run.run_id)
+
+    assert drift["flipped_trials"] == 1
+    assert drift["differing_caliber_axes"] == []
+    assert drift["unattributable_flips"] is True
+    # 这条就是危险的组合: 计数说"口径只有一种", 结论却翻了
+    assert drift["distinct_calibers"] == 1
+
+
+async def test_attempt_without_grader_results_is_undetermined_not_equal():
+    """8.2: 没有结论的中间态不得伪装成"与任何值相同" —— 那会把没数据读成没变化。"""
+    runner, run = await collected_run()
+
+    await _append_regrade_attempt(runner, run, "t1", 0, without_results=True)
+    drift = await runner.verdict_drift(run.run_id)
+
+    assert drift["differing_caliber_axes"] == ["grader_versions"]
+    assert drift["unattributable_flips"] is False  # 结论没翻, 只是口径不可判定
+
+
+async def test_grader_regeneration_changes_only_the_grader_axis_end_to_end():
+    """9.1 (原为一次性驱动里的断言): 换代只动判分实现版本这一根轴。
+
+    版本随判定落盘、统计口径不动 —— 归档里读到的是新桶, 而 `statistics_version`
+    仍是 2, 否则一次判分器换代会被误读成分母口径变了。
+    """
+    agent = MockAgentRunner(success_rate=1.0, latency_range=FAST, script={"t1": ["success"]})
+    runner = make_runner(agent, environment=ProbeEnv(), graders=[BumpingStateGrader()])
+    task = EvalTask(
+        id="t1",
+        prompt="写一个 output.py",
+        max_trials=2,
+        graders=[
+            GraderConfig(
+                type=GraderType.STATE,
+                name="bumping_state",
+                config={"expectations": [{"type": "file_exists", "path": "output.py"}]},
+            )
+        ],
+    )
+    run = await runner.run_suite(
+        EvalSuite(name="bump-suite", version="1.0.0", tasks=[task])
+    )
+    assert [
+        r.details["grader_version"] for t in run.trials["t1"] for r in t.grader_results
+    ] == ["1", "1"]
+    assert run.statistics_version == "2"
+
+    BumpingStateGrader.implementation_version = "2"
+    try:
+        regaded = await runner.regrade_run(run.run_id)
+    finally:
+        BumpingStateGrader.implementation_version = "1"
+
+    assert [
+        r.details["grader_version"] for t in regaded.trials["t1"] for r in t.grader_results
+    ] == ["2", "2"]
+    assert regaded.statistics_version == "2"
+    attempts = await runner.storage.list_grade_attempts(run.run_id)
+    assert [a.grader_versions["bumping_state"] for a in attempts] == ["1", "1", "2", "2"]
+    drift = await runner.verdict_drift(run.run_id)
+    assert drift["differing_caliber_axes"] == ["grader_versions"]
+    assert drift["flipped_trials"] == 0 and drift["unattributable_flips"] is False
 
 
 # ── 6.x 采集开关: 一套声明, 两个字段 ─────────────────────────────────────────

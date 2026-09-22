@@ -149,6 +149,44 @@ _GRADING_OWNED_INVALID_REASONS = frozenset(
 # 「谁能据此判通过」, 不是「报告里能看见什么」
 _ALL_LEVELS = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
 
+# 翻判归因考察的口径轴 (design D6)。每根轴按「所有 attempt 是否同值」参与比较,
+# 所以取值必须可哈希。
+CALIBER_AXES = (
+    "mapping_version",
+    "spec_version",
+    "statistics_version",
+    "judge_models",
+    "grader_versions",
+)
+
+# 没有 grader_results 的 attempt (人工评分未回传等中间态) 在该轴上的取值。用哨兵而
+# 非空集: 空集跨 attempt 比较时与任何值都「相同」, 会把"没数据"读成"没变化"。
+AXIS_UNDETERMINED = "undetermined"
+
+
+def _caliber_values(attempt: GradeAttempt) -> dict[str, Any]:
+    """一条判定条目在各口径轴上的取值。
+
+    `grader_versions` 落盘的是「注册了什么」, 归因要看的是「用了什么」—— 全量并入
+    会让任一未参与的评分器改版污染每一条 trial 的归因。参与者从结论反推即可,
+    不需要新增落盘字段。
+    """
+    participants = sorted({result.grader_name for result in attempt.trial.grader_results})
+    return {
+        "mapping_version": attempt.mapping_version,
+        "spec_version": attempt.spec_version,
+        "statistics_version": attempt.statistics_version,
+        "judge_models": tuple(sorted(attempt.judge_models.items())),
+        "grader_versions": (
+            AXIS_UNDETERMINED
+            if not participants
+            else tuple(
+                (name, attempt.grader_versions.get(name, "unversioned"))
+                for name in participants
+            )
+        ),
+    }
+
 
 # ─── Unavailable simulator (引用未注册模拟器时的降级实现) ───────────────────
 
@@ -644,7 +682,12 @@ class EvalRunner:
         return run
 
     async def verdict_drift(self, run_id: str) -> dict[str, Any]:
-        """重评带来的翻判有多少 —— 只有并列保留的历史才答得出这个问题。"""
+        """重评带来的翻判有多少，以及翻判发生在哪一根口径轴上。
+
+        只有并列保留的历史才答得出这两个问题。`distinct_calibers` 是一个**计数**，
+        它回答不了"哪一根轴变了"，而 `= 1` 会被读成"两次口径相同" —— 翻判因此被
+        暗示成无害。差异轴与不可归因旗标是这条审计真正需要的输出。
+        """
         attempts = await self._list_attempts(run_id)
         grouped: dict[tuple[str, int], list[GradeAttempt]] = {}
         for attempt in attempts:
@@ -655,15 +698,15 @@ class EvalRunner:
             for key, items in regraded.items()
             if items[0].trial.success != items[-1].trial.success
         ]
+        values_by_attempt = [_caliber_values(attempt) for attempt in attempts]
         calibers = {
-            (
-                attempt.mapping_version,
-                attempt.spec_version,
-                attempt.statistics_version,
-                tuple(sorted(attempt.judge_models.items())),
-            )
-            for attempt in attempts
+            tuple(values[axis] for axis in CALIBER_AXES) for values in values_by_attempt
         }
+        differing_axes = [
+            axis
+            for axis in CALIBER_AXES
+            if len({values[axis] for values in values_by_attempt}) > 1
+        ]
         return {
             "run_id": run_id,
             "attempts": len(attempts),
@@ -672,6 +715,8 @@ class EvalRunner:
             "flipped_trials": len(flipped),
             "flip_rate": (len(flipped) / len(regraded)) if regraded else None,
             "distinct_calibers": len(calibers),
+            "differing_caliber_axes": differing_axes,
+            "unattributable_flips": bool(flipped) and not differing_axes,
         }
 
     async def _load_evidence(
