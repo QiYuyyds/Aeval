@@ -86,5 +86,5 @@
 
 - [x] 10.1 8.x 与 9.x 全部完成前，6.4 那句「archive 前置条件满足」**作废** —— 并入项扩大了本变更范围，验收证据与归因语义都需重跑 —— 作废已执行：6.4 那句改成「前置条件按 10.1 修订为 5.x + 6.x + 8.x + 9.x 全完」；验收证据按新语义重跑（16 个进程 + `868 passed` 门），记录表里的 `distinct_calibers` / `differing_caliber_axes` 两行即为重跑后的读数
 - [x] 10.2 `openspec validate make-judge-prompt-deterministic` 通过（两个能力的 delta：`graders` + `orchestration`） —— `1 items, passed 1, failed 0`
-- [ ] 10.3 归档：`openspec archive make-judge-prompt-deterministic`，确认两条新 Requirement 分别进入 `openspec/specs/graders/spec.md` 与 `openspec/specs/orchestration/spec.md`
-- [ ] 10.4 归档后复查：`orchestration` 既有的「每次判定记录其评分口径且历史结论不被覆盖」条目本文未被改动（并入项是 ADDED，不是 MODIFIED）
+- [x] 10.3 归档：`openspec archive make-judge-prompt-deterministic`，确认两条新 Requirement 分别进入 `openspec/specs/graders/spec.md` 与 `openspec/specs/orchestration/spec.md` —— 归档为 `2026-09-22-make-judge-prompt-deterministic`，`totals: added 2 / modified 0`；`graders` 9→10 条（新条目在 `specs/graders/spec.md:137`「判分输入必须对同一份归档证据确定」），`orchestration` 15→16 条（`specs/orchestration/spec.md:219`「跨判定条目的翻判归因必须指明变化在哪一根口径轴」，三个场景的 WHEN/THEN 全文在内）
+- [x] 10.4 归档后复查：`orchestration` 既有的「每次判定记录其评分口径且历史结论不被覆盖」条目本文未被改动（并入项是 ADDED，不是 MODIFIED） —— `git diff --numstat` 对两份 spec 各为 `19 0`（新增 19 行、**删除 0 行**）；纯追加即证明既有条目本文一字未动
