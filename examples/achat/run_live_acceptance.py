@@ -200,11 +200,22 @@ def _build_goal_llm_fn(settings):
                                 {"role": "system", "content": system},
                                 {"role": "user", "content": user},
                             ],
-                            "max_tokens": 300,
+                            # LongCat-2.0 属推理模型: 上下文一长, 300 全花在
+                            # reasoning 上, 200 响应里没有 content (2026-09-13
+                            # 活跑 run_88cdc382b877 实测) —— 给足余量
+                            "max_tokens": 1500,
                         },
                     )
                     resp.raise_for_status()
-                    return resp.json()["choices"][0]["message"]["content"]
+                    text = str(
+                        resp.json()["choices"][0]["message"].get("content") or ""
+                    ).strip()
+                    if not text:
+                        raise RuntimeError(
+                            "响应 200 但 message.content 为空 "
+                            "(推理模型耗尽 max_tokens?)"
+                        )
+                    return text
             except Exception as e:  # noqa: BLE001 — 换下一个候选凭证
                 last_error = e
                 print(f"goal-simulator credential {source} failed: "
