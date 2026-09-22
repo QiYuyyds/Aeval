@@ -59,7 +59,11 @@ def implementation_version_of(grader: Any) -> str:
 def channel_levels(
     evidence: TrialEvidence | None, *channels: str
 ) -> list[ObservedBy]:
-    """指定通道里**实际有值**的读数级别 (按可信度降序; 缺失读数不算支撑)。"""
+    """指定通道里**实际有值**的读数级别 (按可信度降序; 缺失读数不算支撑)。
+
+    排的是一个 set, 所以输出的确定性完全靠 ``-level.strength`` 是个全序 —— 两级
+    同强度时并列项就回落到 set 迭代序, 而这条列表是落盘的判定字段。
+    """
     if evidence is None:
         return []
     present = {

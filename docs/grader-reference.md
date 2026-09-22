@@ -186,6 +186,7 @@ class MyGrader:
 - 输出无法解析为判定 → `invalid` / `verdict_unparseable`；**各维度 0.5 兜底已删除**
 - `dimensions` 为空 → `invalid` / `no_criteria_configured`
 - 平均分按**配置的全集维度数**为分母：judge 漏答某个维度按 0 计入，不会因缺席而抬高分数
+- 判分输入对同一份归档证据**确定**：同一批字节在任何进程里重评都构造出逐字节相同的提示词（自 `implementation_version` 3 起；此前工具清单按集合迭代序拼接，跨进程会变）
 
 ## state_check（type: state）— 环境状态检查
 

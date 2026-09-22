@@ -52,7 +52,7 @@ class ModelBasedGrader:
     # judge 读的是对话正文: 正文可能是 agent 自述, 因此声明到 subject 一级,
     # 由套件的 allow_subject 决定它能不能单独定案
     evidence_levels = (ObservedBy.HARNESS, ObservedBy.RUNNER, ObservedBy.SUBJECT)
-    implementation_version = "2"
+    implementation_version = "3"
 
     def __init__(self, llm_fn: LLMFn | None = None):
         """
@@ -154,12 +154,13 @@ class ModelBasedGrader:
         input_msg = trial.transcript[0] if trial.transcript else "N/A"
         output_msg = trial.transcript[-1] if trial.transcript else "N/A"
 
-        # 提取工具调用摘要
-        tools_used = list(set(
+        # 提取工具调用摘要 —— 必须 sorted: set 迭代序随进程 hash 种子变化,
+        # 不排序等于同一批归档字节每次重评读到不同的工具清单
+        tools_used = sorted({
             msg.get("tool_name", "")
             for msg in trial.transcript
             if msg.get("role") == "tool_call"
-        ))
+        })
 
         dims_json = ", ".join(f'"{d}": 0.0' for d in dimensions)
 

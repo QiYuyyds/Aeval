@@ -38,6 +38,12 @@ Aeval 的版本语义变更记录。格式遵循 [Keep a Changelog](https://keep
 - **污染卫生**：suite 新增规范字段 `canary_guid`（UUID 格式校验，随 run 输出与运行记录呈现；框架不做运行时强制）与任务标记 `holdout: true`——默认不跑（`run` 排除并报告跳过数），`--include-holdout` 显式放行；过滤在 `EvalRunner.run_suite` 入口完成，REST 与宿主挂载自动同享；全 holdout 套件报错拒绝运行（不产出空 run）；跳过数不进 RunSummary（统计口径零变更，`statistics_version` 不动）。`docs/release-checklist.md` 新增公开发布前检查单（canary 生成与用途、holdout 拆分、许可证与数据来源声明、pack 发布方式）。
 - **破坏性**：无。单文件路径加载、无 holdout 套件的运行、未声明 `canary_guid` 的套件三条现状路径行为逐字节一致（各有回归测试钉住）；唯一新增 pip 依赖为零，git 为可选外部命令。
 
+### 修复（make-judge-prompt-deterministic，目标 0.4.0）
+
+- **判分提示词必须可复现**：`model_based` 把工具清单以 `list(set(...))` 拼进 judge 提示词，而字符串 hash 按进程随机化——同一批归档字节在不同进程里重评会构造出**不同的提示词**，变更④ 承诺的"对同一批字节重评"因此不成立。现改为按内容排序，判分输入成为（归档证据, rubric, dimensions, 判分配置）的纯函数，跨进程重评逐字节一致（守护测试真起两个子进程，不给它们设 `PYTHONHASHSEED`）。
+- **重评同一批字节可能得到不同分数，且这是修复**：`ModelBasedGrader.implementation_version` `"2"` → `"3"`，含两种以上工具调用且判据读到工具清单的历史 trial，其 verdict 可能翻转。翻转不静默处理——版本随判定落盘，`verdict_drift` 能把它们单独归因到评分器版本这一维度，而不与"换了 judge 模型""证据边界变了"混成同一个数字。
+- `statistics_version` **维持 2**：本变更只修判分输入的确定性，不动分母口径，历史 run **无需迁移**、不回算。
+
 ## [0.2.0] — 2026-09-06
 
 ### 变更
