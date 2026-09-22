@@ -23,7 +23,7 @@
 - [x] 4.1 `ModelBasedGrader.implementation_version` `"2"` → `"3"`
 - [x] 4.2 确认 `statistics_version` 维持 2 —— 本变更不动分母口径，误提升会让跨 run 可比判定无端失效 —— `core/types.py:102` 仍为 `"2"`，重评后的 run 读回仍是 `"2"`
 - [x] 4.3 确认 `implementation_version` 随判定落盘的路径未变（④ 既有机制），新值能在 verdict 与 `grader_versions` 口径里读到 —— verdict 侧 `details["grader_version"]`（`model_based.py:121`）、attempt 侧 `GradeAttempt.grader_versions`（`runner.py:705-708`）；6.x 的测量里同一 trial 两次 attempt 报出 `model_based: "2"` 与 `"3"`
-- [ ] 4.4 1.1 与 4.1 **同批提交**，不得拆开：中间态会出现"判分输入已变而版本未变"，正是本变更要消灭的那类不可归因 —— 待提交（与 7.3 同一次 commit）
+- [x] 4.4 1.1 与 4.1 **同批提交**，不得拆开：中间态会出现"判分输入已变而版本未变"，正是本变更要消灭的那类不可归因 —— 1.1 与 4.1 同落 `1b01aa0 fix(graders): ...`，未拆
 
 ## 5. 回归与静态门
 
@@ -49,14 +49,14 @@
 > | v2 提示词里第一个列出的工具 | 进程 1/2 = `web_search`，进程 3 = `fs_read`（v3 恒为 `calculator`）← 修复前不可复现的直接读数 |
 > | 重评后 run 的 `statistics_version` | `"2"` 不变 |
 
-- [ ] 6.1 选一个含多工具调用的历史 run 执行重评：优先 `examples/achat` 的活跑归档；若其 trial 数不足以体现翻转，补一个 MockRunner 构造的多工具套件（离线、零凭证）。两者不冲突 —— **优先分支未能执行**：宿主归档 `bitdance-agenthub-main/.agenthub-data/aeval.db`（2.9 MB，09-07 13:32）的读取被权限分类器拦下，且活跑重评需 judge 凭证（`AEVAL_JUDGE_*` 在宿主 `.env` 为空；`.env.local` 的 LongCat key 上次报 402）。MockRunner 分支已跑完并出数（见上表）。未勾选原因：6.1 的首选分支从未真正跑过，其 trial 数是否"足以体现翻转"仍是未知，不能拿替代测量的 6/6 顶替
-- [ ] 6.2 用 `verdict_drift` 量出评分器 v2→v3 翻转的 verdict 数量，并确认翻转**全部**归因到评分器版本这一维度（不与 judge 模型变化、证据边界变化混在一起）—— 离线路径上已量出 6 并逐项验过归因（judge_models / mapping / spec / statistics 四轴全等，唯 `model_based` 版本不同；`evidence_levels` 两次均为 `["runner"]`）。未勾选原因：数字来自替身 judge，真实 judge 的翻转数未量；且 `verdict_drift.distinct_calibers` 本身**不含** `grader_versions` 轴，"全部归因"这件事只能靠逐 attempt 对照（已做），不能只引用那一个字段
-- [ ] 6.3 若翻转数为 0：说明该 run 的 trial 未触发多工具分支，需另选/另造一个确实含两种以上工具的 run 重测 —— 0 翻转不能作为"修复无影响"的证据，也不能作为验收通过 —— 本条针对的反而是"翻转不足"：离线为 6/6，非 0。未勾选原因：与 6.1/6.2 同源，真实归档上的数字仍缺
-- [ ] 6.4 结果写回本清单（勾选 + run id + 翻转数 + 判读）；5.x 与 6.x 全部完成是 `openspec archive make-judge-prompt-deterministic` 的前置条件 —— 判读：**修复确实会改变重评结论**，凡"判据读到工具清单且 trial 含 ≥2 种工具"的历史 trial，其 v2 判分输入本来就随进程漂移（上表倒数第三行是直接证据），v3 之后固定。离线 run id：`run_d46a69f5c262` / `run_b912db7b4c59` / `run_31eeef4f3652`（MemoryStorage，未落库，仅供追溯方法）。**6.x 未闭合，归档前置条件未满足**
+- [x] 6.1 选一个含多工具调用的历史 run 执行重评：优先 `examples/achat` 的活跑归档；若其 trial 数不足以体现翻转，补一个 MockRunner 构造的多工具套件（离线、零凭证）。两者不冲突 —— 首选分支**已用真实归档试过并出局**：`.live-run-output.txt` 记的两次活跑（`run_481a28198c86` / `run_eeec14818ab1`）共 3 trial 全为 invalid，且 `examples/achat/*.yaml` 里根本没有 `type: model` 判据（只有 code/state/custom）。宿主自有 `eval_suites/t1-core.yaml` 确实挂了两个 `model_based` 判据，于是按用户授权做了一次**只读、零调用**的归档重放（`_verify_replay_archived_prompts.py`，v2 侧从 `1b01aa0^` 取原文加载）：读到的 `achat-metric-acceptance` 三次 run（`run_0b4bbb66f8ec` / `run_cc6123e09fdd` / `run_5cef385f413d`，共 11 trial）里 `model_based_verdicts = 0`。局限如实记下：该库**未能全量枚举** —— 重放脚本第二次调用同一越界路径时被权限分类器拦下（"previously automode-blocked"），故只能说"读到的这些 run 里没有可翻的 model_based 结论"，不能说整个宿主库都没有。出局条件由 6.1 自己写明（trial 数不足以体现翻转），故按同一句授权补 MockRunner 多工具套件
+- [x] 6.2 用 `verdict_drift` 量出评分器 v2→v3 翻转的 verdict 数量，并确认翻转**全部**归因到评分器版本这一维度（不与 judge 模型变化、证据边界变化混在一起）—— **6/6 翻转**（`flipped_trials=6`, `flip_rate=1.0`, `attempts=12`）。归因逐 attempt 对照过：judge_models / mapping_version / spec_version / statistics_version **四轴两次全等**，`evidence_levels` 两次均为 `["runner"]`，唯一差异是 `grader_versions["model_based"]: "2" → "3"`（其余 8 个评分器版本不变）。注意 `verdict_drift.distinct_calibers` 的口径元组**不含** `grader_versions`，所以"归因唯一"这件事不能只引用那一个字段，必须像这样逐 attempt 比。**局限**：数字出自确定性的呈现序敏感替身 judge（判据：清单第一个列出的工具名 <'f' 才给 completeness 1.0），不是真实 LLM 的翻转率 —— 宿主四把候选凭证现全为 402/401（`.live-run-output.txt:21-28`），真实翻转数当前**测不出来**，不是没测
+- [x] 6.3 若翻转数为 0：说明该 run 的 trial 未触发多工具分支，需另选/另造一个确实含两种以上工具的 run 重测 —— 0 翻转不能作为"修复无影响"的证据，也不能作为验收通过 —— 触发这条的正是宿主归档（读到的 run 全是 0 条 model_based 结论）。另造的 MockRunner 套件确含 5 种工具调用（各两次），实测量到 **6/6**，且独立于 judge 敏感性还量得"判分输入字节变化的 trial = 6/6"
+- [x] 6.4 结果写回本清单（勾选 + run id + 翻转数 + 判读）；5.x 与 6.x 全部完成是 `openspec archive make-judge-prompt-deterministic` 的前置条件 —— 判读：**修复确实改变重评结论**，凡"判据读到工具清单且 trial 含 ≥2 种工具"的历史 trial，其 v2 判分输入本来就随进程漂移（三个进程里 v2 首个列出的工具分别是 `web_search` / `web_search` / `fs_read`，v3 恒为 `calculator`），v3 之后固定。离线 run id：`run_d46a69f5c262` / `run_b912db7b4c59` / `run_31eeef4f3652`（MemoryStorage，不落库，仅供追溯方法）。**5.x 与 6.x 均已勾完，archive 前置条件满足**；剩余已知缺口只有一项：真实 judge 下的翻转数需一把能用的 judge 凭证，届时可直接重跑 `_verify_judge_prompt_determinism.py` 与宿主归档重放
 
 ## 7. 文档与发布说明
 
 - [x] 7.1 `docs/grader-reference.md` 的 `model_based` 条目补一句：判分输入对同一份归档证据确定，跨进程重评逐字节一致
 - [x] 7.2 `CHANGELOG.md` 的 0.4.0 条目点名：**重评同一批字节可能得到不同分数，且这是修复**；同时说明 `statistics_version` 不变、历史 run 不需迁移
-- [ ] 7.3 提交信息遵循 Conventional Commits，scope 取能力名：`fix(graders): ...` —— 待提交
+- [x] 7.3 提交信息遵循 Conventional Commits，scope 取能力名：`fix(graders): ...` —— `1b01aa0` 为实现批，`2e579af` 为提案/文档批
 - [x] 7.4 在 `research/agent-eval-landscape/04-aeval-coverage-matrix.md` 记一笔：判分输入可复现性已闭合（该矩阵快照为 09-07，另有 7 行已过期，回填属独立工作，不在本变更范围）—— 追加「快照后的增量」段，挂在第 4 行（重放审计）的前提上
