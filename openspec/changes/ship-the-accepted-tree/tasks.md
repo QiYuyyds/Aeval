@@ -133,9 +133,26 @@
 
 ## 8. 对外动作 —— 需你现场确认，不可自动执行
 
-- [ ] 8.1 【现场确认】打 tag `<版本号>`
-- [ ] 8.2 【现场确认】推 tag 到远端
+- [x] 8.1 【现场确认】打 tag `<版本号>`
+  > 已确认执行。**annotated** tag `v0.3.0`（与既有 v0.1.0 / v0.2.0 同形态，`%(objecttype)=tag`），指向发布提交 `18eee13`（`chore(release): ship the accepted tree as 0.3.0 and backfill the missing ⑧ notes`）。提交面：CHANGELOG + 两份 README + 四份 docs + 本变更目录，共 11 个文件、**零 `src/` 与测试**。
+- [x] 8.2 【现场确认】推 tag 到远端
+  > **执行前发现并如实报告**：本地 `main` 当时领先 `origin/main` **39 个提交**（远端停在 09-06 的 v0.2.0 发布提交），即 ④⑤⑥⑦P0⑧ 六个变更**在 GitHub 上同样是未发布状态**——不止 PyPI 落后。经你确认按「提交 + 打 tag + 推 main 和 tag」一次做完。
+  > `git push origin main` → `f0338c6..18eee13`，退出码 0；`git push origin v0.3.0` → `* [new tag]`，退出码 0。
+  > **远端回读为证**（不拿"命令没报错"当已推送）：`git ls-remote` 显示 `refs/heads/main` = `18eee13…`、`refs/tags/v0.3.0` = `40d6bbb…`，且 `origin/main` 与本地 `HEAD` 同为 `18eee13`。CHANGELOG 底部两条链接实取均 **HTTP 200**（`compare/v0.2.0...v0.3.0`、`releases/tag/v0.3.0`）。
 - [ ] 8.3 【现场确认】上传 wheel 与 sdist 到 PyPI
+  > **按你的选择留给你在终端执行**，PyPI token 全程不经我手。待上传的两个文件已通过干净环境验证，位于：
+  > ```
+  > D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/aeval_framework-0.3.0-py3-none-any.whl   sha256=267c40c3b26e93fe810128ccad8068c46fde03703b3e573d2eda25b…
+  > D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/aeval_framework-0.3.0.tar.gz              sha256=0cf9aa74bf71bb23aebe3afe1af380789f137e245b8347da47b0d1d…
+  > ```
+  > 建议命令（**显式点名这两个文件，不要用 `dist/*`**，理由见 6.6：`packages/agent-eval/dist/` 里还留着 09-06 的 0.2.0 wheel 与 sdist，`build` 不清空输出目录）：
+  > ```bash
+  > pipx run twine check  D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/*
+  > pipx run twine upload D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/aeval_framework-0.3.0-py3-none-any.whl \
+  >                       D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/aeval_framework-0.3.0.tar.gz
+  > ```
+  > （本机 `twine` 与 `keyring` 均未安装；`pipx run` 可免全局装。若用现有 Python 环境，先 `python -m pip install twine`。）
+  > **上传完成后立刻跑第 9 组的同一个回读脚本**：`bash .qoder/tmp/readback.sh pypi 0.3.0`。
 > 8.1–8.3 每一步都不可逆或对外可见（PyPI 不允许重传同一版本号）。逐项单独确认，不要打包批准。
 
 ## 9. 发布后回读（D3）
@@ -149,5 +166,14 @@
 ## 10. 收尾与交接
 
 - [ ] 10.1 归档本变更（`openspec archive ship-the-accepted-tree`）；它 `skip_specs: true`，归档后 `openspec/specs/` 应无变化——**确认这一点**，若有变化说明本变更越界改了行为
-- [ ] 10.2 提交信息遵循 Conventional Commits，scope 用 `release`：`fix(release): ...` / `chore(release): ...`
-- [ ] 10.3 交接项写进发布说明末尾或独立记录，四条各自独立、都不阻塞本次发布：① `dataset` 能力有 10 个 py 文件而 spec 为零（`openspec/specs/dataset/` 不存在，词表里却有它）；② 真实 judge 凭证下的敏感度测量（`examples/presentation-probes/measure_presentation_sensitivity.py --live`）；③ `core/metrics.py:876` 众数并列与 `:358-361` κ 的 `p_e` 求和次序两处同类非确定源；④ 覆盖矩阵 `research/agent-eval-landscape/04-aeval-coverage-matrix.md` 快照 09-07、现约 9 行过期
+  > **待第 9 组回读确认后执行**（发布未被索引回读证实之前不收口）。归档前先记基数供对照：`openspec/specs/` 本次**一字未动**（`git status --porcelain openspec/specs` 空）。
+- [x] 10.2 提交信息遵循 Conventional Commits，scope 用 `release`：`fix(release): ...` / `chore(release): ...`
+  > 发布提交：`18eee13 chore(release): ship the accepted tree as 0.3.0 and backfill the missing ⑧ notes` —— scope `release`、类型 `chore`（本次不改行为，只收敛记录与制品），正文写的是"为什么"（17 天未发布 / 版本号是发布序列 / ⑧ 一段都没有 / 从构建物验证），并明确"零 `src/` 与测试改动"。tag `v0.3.0` 落在这个提交上。
+  > 交接记录提交随后另起一笔（同为 `release` scope）；归档那笔沿用仓库既有形态 `chore(openspec): archive <change>`，与 `31c8cdc` 等先前归档提交一致。
+- [x] 10.3 交接项写进发布说明末尾或独立记录，四条各自独立、都不阻塞本次发布
+  > 取**独立记录**：`openspec/changes/ship-the-accepted-tree/HANDOVER.md`。理由——tag `v0.3.0` 已经落在发布提交上，再往 CHANGELOG 里加东西会让"已打 tag 的发布说明"与"仓库里看到的发布说明"不是同一份，正是本变更要消灭的那种失真。
+  > **A 段 = 原四条**（① `dataset` 有 10 个 py 文件而 `openspec/specs/dataset/` 不存在，两个事实均已实测；② 真实凭证下的敏感度测量；③ `core/metrics.py` 两处同类非确定源；④ 覆盖矩阵快照过期），**B 段 = 本次执行新增四条**（⑤ 版本号双副本无测试守护；⑥ 寄宿形态 OpenAPI 硬编码 `0.1.0`；⑦ 只装 core 会得到必然崩溃的 `eval-suite`；⑧ 两份 README 余一处翻译不对称）。
+  > **其中两条按原清单写不下来，已核实后改写**：
+  > - 原清单写「`core/metrics.py:876` 众数并列」—— **该号已失效**：`:876` 现在是步数效率诊断，全仓 grep `众数` 零命中。真位置是 **`:1001`** 的 `max(set(unknown_reasons), key=unknown_reasons.count)`（打平由 set 序决定）；κ 的 `p_e` 那处 `:358-361` **核对无误**（`categories = set(...)` 后进 `sum(...)`）。
+  > - 原清单写「覆盖矩阵现约 9 行过期」—— 该文件 `:74` **自陈为 7 行**，且 `:72-73` 显示 09-22 已随 ⑧ 更新过第 4、8 行。两个数都未逐行复核，记录里已改为"以逐行重判为准，别引用任何现成数字"。
+  > **另有两条过程事实记在 C 段**：`main` 曾领先远端 39 个提交（下次发布须把 `git rev-list origin/main...HEAD` 与 tag×PyPI 一起查）；`python -m build` 不清空输出目录（`twine upload dist/*` 会连 0.2.0 一起重传）。
