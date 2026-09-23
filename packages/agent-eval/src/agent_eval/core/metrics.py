@@ -32,6 +32,7 @@ from agent_eval.core.types import (
     EvidenceGap,
     InvalidReason,
     PassKEstimate,
+    PresentationOperatorReport,
     ResourceSummary,
     RunResult,
     ScoreDistribution,
@@ -508,6 +509,130 @@ def agreement_report(
         value=krippendorff_alpha(matrix, level="nominal"),
         raters=len(raters),
         aligned_samples=len(pair_units),
+    )
+
+
+# ─── Presentation invariance (spec: statistics「呈现不变性与跨评分者信度不得合成」) ──
+
+PASS_LABEL = "pass"
+FAIL_LABEL = "fail"
+
+
+def presentation_operator_report(
+    *,
+    operator: str,
+    invariant: str,
+    presentations: list[str],
+    baseline: str,
+    units: list[dict[str, str | None]],
+    score_shifts: list[float] | None = None,
+    unreadable_reasons: list[str] | None = None,
+) -> PresentationOperatorReport:
+    """一个呈现算子的不变性报告 —— 测的是**结论翻不翻**, 不是分数漂多少。
+
+    每份呈现被当作一个标签序列喂给既有的 κ/α 数学, 但这**不是**跨评分者信度:
+    评分者只有一个, 变的是呈现。两类量各占一个类型、各报各的数, 不得合成
+    (spec: statistics)。
+
+    翻转与统计口径同源: 只有结论跨过 threshold 才算翻 (design D4)。对齐样本不足
+    时复用 ``MIN_ALIGNED_RATINGS_FOR_AGREEMENT`` 语义报不可计算, 不伪造数值。
+    """
+    if baseline not in presentations:
+        raise ValueError(f"基线呈现 {baseline!r} 必须在参与比较的呈现里")
+    others = [p for p in presentations if p != baseline]
+    shifts = list(score_shifts or ())
+
+    aligned = [
+        u for u in units if sum(1 for p in presentations if u.get(p) is not None) >= 2
+    ]
+    gaps = sum(1 for u in units if any(u.get(p) is None for p in presentations))
+
+    compared = 0
+    flipped = 0
+    differing: list[str] = []
+    for unit in units:
+        base = unit.get(baseline)
+        readable = [p for p in others if unit.get(p) is not None]
+        if base is None or not readable:
+            continue
+        compared += 1
+        disagreed = [p for p in readable if unit[p] != base]
+        if disagreed:
+            flipped += 1
+            differing.extend(disagreed)
+
+    shift_max = max(shifts) if shifts else None
+    shift_mean = sum(shifts) / len(shifts) if shifts else None
+    flip_rate = flipped / compared if compared else None
+    distinct_differing = sorted(set(differing))
+
+    measure: str | None = None
+    value: float | None = None
+    uncomputable: str | None = None
+    if len(presentations) < 2:
+        uncomputable = (
+            f"不可计算: 该算子在当前判分配置下只构造出 {len(presentations)} 份呈现, "
+            "没有可比较的第二份 (不是「没有翻转」)"
+        )
+    elif not aligned:
+        cause = (unreadable_reasons or [""])[0]
+        uncomputable = (
+            f"不可计算: {len(units)} 个抽中 trial 上没有任何一份呈现读得出结论"
+            + (f" (首个原因: {cause})" if cause else "")
+            + " —— judge 不可用 (含无凭证) 是没测, 不是不敏感"
+        )
+    elif len(aligned) < MIN_ALIGNED_RATINGS_FOR_AGREEMENT:
+        uncomputable = (
+            f"不可计算: 对齐样本过少 ({len(aligned)} < "
+            f"{MIN_ALIGNED_RATINGS_FOR_AGREEMENT}); 少于这个数的 κ/α 是噪声"
+        )
+    elif len(presentations) == 2 and not any(
+        u.get(others[0]) is None for u in aligned
+    ):
+        first, second = baseline, others[0]
+        measure = "cohen_kappa"
+        value = cohen_kappa([u[first] for u in aligned], [u[second] for u in aligned])
+    else:
+        measure = "krippendorff_alpha"
+        value = krippendorff_alpha(
+            [[u.get(p) for p in presentations] for u in aligned], level="nominal"
+        )
+
+    if flipped:
+        status: str = "sensitive"
+        # 翻了几判是直接观察到的事实, 不依赖统计量够不够 —— 样本不足也不能把它读成"没翻"
+        reason = (
+            f"检出呈现敏感: {flipped}/{compared} 个可比较 trial 的结论随呈现翻转 "
+            f"(与基线不同的呈现: {', '.join(distinct_differing)}); "
+            f"本条只在「{invariant}」这个不变量内成立"
+        )
+    elif uncomputable:
+        status = "not_computable"
+        reason = uncomputable
+    else:
+        status = "not_detected"
+        reason = (
+            f"未检出呈现敏感: {len(aligned)} 个对齐 trial 上各呈现结论全同 "
+            f"({measure}={value:.4f}); 这是一条结论, 但只在「{invariant}」"
+            "这个不变量内成立 —— 把它引用成普适的否证是越界的"
+        )
+
+    return PresentationOperatorReport(
+        operator=operator,
+        invariant=invariant,
+        presentations=list(presentations),
+        baseline_presentation=baseline,
+        status=status,
+        measure=measure,
+        value=value,
+        reason=reason,
+        aligned_trials=len(aligned),
+        gap_trials=gaps,
+        flipped_trials=flipped,
+        flip_rate=flip_rate,
+        flip_presentations=distinct_differing,
+        max_score_shift=shift_max,
+        mean_score_shift=shift_mean,
     )
 
 

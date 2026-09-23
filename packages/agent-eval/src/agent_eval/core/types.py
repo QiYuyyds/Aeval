@@ -1516,6 +1516,100 @@ class AgreementReport(BaseModel):
     disagree: int | None = Field(None, description="存在分歧的样本数 (仅 κ 时提供)")
 
 
+class PresentationOperatorReport(BaseModel):
+    """单个呈现算子的不变性报告 (spec: graders「判分器可被呈现探针检视」)。
+
+    与 ``AgreementReport`` 分型存放, 刻意不共用类型: 那边的 ``raters`` 建立在
+    **不同评分者**之上, 这里比的是**同一评分者的不同呈现** —— 两类量一旦合进一个
+    数, "两个 judge 一致地错" 就会伪装成 "呈现不敏感" (spec: statistics)。
+
+    进分母的是**结论** (通过/失败), 分数移动量另列一维 (``max_score_shift``):
+    漂移决定"要不要修"的紧迫度, 不决定"敏不敏感"的答案。
+    """
+
+    operator: str = Field(..., description="算子名, 如 anchor_value")
+    invariant: str = Field(
+        ...,
+        description="该算子保持的不变量声明 —— 读者据此判断它测的到底是什么 "
+        "(dimension_order 那条含「末位浮点差异不计为呈现敏感」的限定)",
+    )
+    presentations: list[str] = Field(
+        default_factory=list, description="参与比较的呈现名 (含基线那一份)"
+    )
+    baseline_presentation: str = Field(
+        "", description="生产今天实际送出去的那一份呈现名"
+    )
+    status: Literal["sensitive", "not_detected", "not_computable"] = Field(
+        ...,
+        description="sensitive = 检出结论翻转; not_detected = 测过了且未检出 (一条结论); "
+        "not_computable = 没测出来 (无凭证/无可读读数/对齐样本不足), 三种措辞 MUST NOT 混用",
+    )
+    measure: Literal["cohen_kappa", "krippendorff_alpha"] | None = Field(
+        None, description="呈现间一致性所用的统计量; None = 不可计算"
+    )
+    value: float | None = Field(
+        None, description="κ/α 值 (把每份呈现当一个标签序列); None = 不可计算"
+    )
+    reason: str | None = Field(
+        None, description="状态判读的依据 (未检出的样本量 / 不可计算的具体原因)"
+    )
+    aligned_trials: int = Field(
+        0, description="对齐 trial 数 (≥2 份呈现都读得出结论, 才进 κ/α 的分母)"
+    )
+    gap_trials: int = Field(
+        0, description="至少一份呈现读不出结论的 trial 数 (不冒充一致也不冒充翻转)"
+    )
+    flipped_trials: int = Field(0, description="结论随呈现翻转了的 trial 数")
+    flip_rate: float | None = Field(
+        None, description="flipped_trials / 可比较 trial 数; 无可比较 trial 时 None (不给 0.0)"
+    )
+    flip_presentations: list[str] = Field(
+        default_factory=list, description="与基线结论不同的那些呈现名"
+    )
+    max_score_shift: float | None = Field(
+        None, description="同一 trial 各呈现分数的最大位移 (跨全部 trial 取最大)"
+    )
+    mean_score_shift: float | None = Field(
+        None, description="同一 trial 各呈现分数位移的均值; 与 flipped_trials 分列不混计"
+    )
+
+
+class PresentationInvarianceReport(BaseModel):
+    """一次呈现探针运行的完整报告 (库层入口产物; 无 YAML/CLI/REST 表面, 不落库)。
+
+    ``seed`` 与 ``sample`` 必填且落在这里: 抽样本身必须可复现, 否则第二次跑不出
+    同一个数, 探针就成了框架自己的新不可复现源。``judge_calls`` 是显式成本读数
+    (份数 × 抽中 trial 数), 不藏进配置。
+    """
+
+    seed: int = Field(..., description="抽样种子 —— 落盘使同一次抽样可复现")
+    sample: float = Field(..., gt=0.0, le=1.0, description="抽样比例 (内核不给默认值)")
+    trials_total: int = Field(0, description="可供抽样的 trial 总数")
+    trials_sampled: int = Field(0, description="实际抽中的 trial 数")
+    variants_per_trial: int = Field(
+        0, description="每个抽中 trial 送出的不同呈现份数 (基线与各算子的公共呈现只算一份)"
+    )
+    judge_calls: int = Field(0, description="本次探针实际发出的 judge 调用数 = 份数 × 抽中数")
+    by_operator: dict[str, PresentationOperatorReport] = Field(
+        default_factory=dict, description="算子名 → 该算子的不变性报告"
+    )
+    status: Literal["sensitive", "not_detected", "not_computable"] = Field(
+        ...,
+        description="逐算子合成: 任一 sensitive 即 sensitive; 否则任一 not_computable "
+        "即 not_computable; 否则 not_detected —— 「没测出来」不得被「未检出」掩盖",
+    )
+    interpretation_note: str = Field(
+        "",
+        description="这份数字能证明什么、不能证明什么 —— 随报告本身呈现, "
+        "不依赖读者先去读设计文档",
+    )
+
+    @property
+    def any_sensitive(self) -> bool:
+        """任一算子检出了结论翻转。"""
+        return any(r.status == "sensitive" for r in self.by_operator.values())
+
+
 class TrialResult(BaseModel):
     """单次 trial 的完整结果"""
 
