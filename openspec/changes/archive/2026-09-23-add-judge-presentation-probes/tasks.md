@@ -69,5 +69,9 @@
 
 - [x] 8.1 `openspec validate add-judge-presentation-probes --strict` 通过（两个能力的 delta：`graders` + `statistics`）—— `Change 'add-judge-presentation-probes' is valid`
 - [x] 8.2 归档前复查：`graders` 与 `statistics` 的既有 Requirement 条目本文均未被改动（两条都是 ADDED）—— 两份 delta 的**唯一**操作头都是 `## ADDED Requirements`；`git diff --stat -- openspec/specs` 为空（一行未动）。归档前的基数记在这里供 8.3 对照：`graders` 10 条 Requirement / 21 个场景，`statistics` 15 条 / 31 个场景
-- [ ] 8.3 归档：`openspec archive add-judge-presentation-probes`，确认两条新 Requirement 分别进入 `openspec/specs/graders/spec.md` 与 `openspec/specs/statistics/spec.md`
-- [ ] 8.4 归档后在记录里点名下一步的三个候选（都应在第一次真测量之后再设计）：修锚、探针的 YAML/CLI 表面、跨 run 敏感性趋势
+- [x] 8.3 归档：`openspec archive add-judge-presentation-probes`，确认两条新 Requirement 分别进入 `openspec/specs/graders/spec.md` 与 `openspec/specs/statistics/spec.md` —— 归档为 `2026-09-23-add-judge-presentation-probes`，`totals: added 2 / modified 0 / removed 0`。`graders` 10→11 条 Requirement、21→24 个场景（新条目「判分器可被呈现探针检视且探针不产出结论」），`statistics` 15→16 条、31→34 个场景（新条目「呈现不变性与跨评分者信度不得合成为同一个数」）；两份 spec 的 diff 各为 `19 0`（纯追加、删除 0 行）—— 这就是 8.2 那句"既有条目本文未动"的读回证据
+- [x] 8.4 归档后在记录里点名下一步的三个候选（都应在第一次真测量之后再设计）：修锚、探针的 YAML/CLI 表面、跨 run 敏感性趋势 —— 三个候选各等什么，记在这里免得下次重推：
+  1. **修锚**（把 `{"quality": 0.0}` 换成不带数字的形状，或按测出的幅度决定要不要设门）—— 等一把可用的 judge 凭证量出真实幅度。今天已知的是"机制能测"，不是"锚有没有害"。
+  2. **探针的 YAML / CLI / REST / 看板表面** —— 等配置形状被至少一次真测量 inform 过再承诺；这些表面背同大版本兼容承诺（沿用 ④ 对 `regrade` 的处理与理由）。`/v1/meta` 能力清单要不要出现这一类报告，也在同一个变更里回答（design Open Questions 已挂账）。
+  3. **跨 run 的敏感性趋势** —— 等一串真测量。单点没有趋势可言，且 `storage` 无迁移机制会让"先建表再说"变成不可逆决定。
+  **另有第四个候选**（原提案未列，别按三个数收口）：`dimension_order` 这一轴在二元结论上今天双向不可翻（等权平均对排列对称 + 逆序求和在真实值域上逐位相同，见 2.2b），所以若真要测列举序敏感，缺的是**逐维读数或加权聚合**这一层，不是再多加一个呈现算子。它值不值得做，同样等第一次真测量之后再判。
