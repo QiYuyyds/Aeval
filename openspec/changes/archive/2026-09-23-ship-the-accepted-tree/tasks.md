@@ -139,7 +139,7 @@
   > **执行前发现并如实报告**：本地 `main` 当时领先 `origin/main` **39 个提交**（远端停在 09-06 的 v0.2.0 发布提交），即 ④⑤⑥⑦P0⑧ 六个变更**在 GitHub 上同样是未发布状态**——不止 PyPI 落后。经你确认按「提交 + 打 tag + 推 main 和 tag」一次做完。
   > `git push origin main` → `f0338c6..18eee13`，退出码 0；`git push origin v0.3.0` → `* [new tag]`，退出码 0。
   > **远端回读为证**（不拿"命令没报错"当已推送）：`git ls-remote` 显示 `refs/heads/main` = `18eee13…`、`refs/tags/v0.3.0` = `40d6bbb…`，且 `origin/main` 与本地 `HEAD` 同为 `18eee13`。CHANGELOG 底部两条链接实取均 **HTTP 200**（`compare/v0.2.0...v0.3.0`、`releases/tag/v0.3.0`）。
-- [ ] 8.3 【现场确认】上传 wheel 与 sdist 到 PyPI
+- [x] 8.3 【现场确认】上传 wheel 与 sdist 到 PyPI
   > **按你的选择留给你在终端执行**，PyPI token 全程不经我手。待上传的两个文件已通过干净环境验证，位于：
   > ```
   > D:/java/project/Aeval-publish/.qoder/tmp/dist-0.3.0/aeval_framework-0.3.0-py3-none-any.whl   sha256=267c40c3b26e93fe810128ccad8068c46fde03703b3e573d2eda25b…
@@ -153,20 +153,27 @@
   > ```
   > （本机 `twine` 与 `keyring` 均未安装；`pipx run` 可免全局装。若用现有 Python 环境，先 `python -m pip install twine`。）
   > **上传完成后立刻跑第 9 组的同一个回读脚本**：`bash .qoder/tmp/readback.sh pypi 0.3.0`。
+  > **完成记录（2026-09-23 复核补记）**：上传由你在自己终端执行、token 全程未经我手。证据不取"上传命令返回 0"，取第 9 组的索引回读 —— `https://pypi.org/pypi/aeval-framework/json` 现返回 `releases = ['0.1.0','0.2.0','0.3.0']`、`latest = 0.3.0`，且干净环境按 `aeval-framework[api,cli]==0.3.0` 从公网索引装成并实跑通过（见 9.1–9.4）。
 > 8.1–8.3 每一步都不可逆或对外可见（PyPI 不允许重传同一版本号）。逐项单独确认，不要打包批准。
 
 ## 9. 发布后回读（D3）
 
-- [ ] 9.1 从 PyPI 索引解析得到新版本号与元数据
-- [ ] 9.2 干净环境按版本号**精确安装**一次（`aeval-framework==<版本号>`）
-- [ ] 9.3 装上后跑 `eval-suite run examples/minimal/suite.yaml`，核对退出码**与输出内容**
-- [ ] 9.4 记一句判读：证据是"从索引回读成功并实跑通过"，**不是**"twine 返回 0"。中间任何一环都可能静默降级（镜像延迟、sdist 缺文件、平台 wheel 不匹配）
-- [ ] 9.5 若回读失败：**不回收 tag、不重传版本号**（做不到），立即发补丁版本并在 CHANGELOG 记因
+- [x] 9.1 从 PyPI 索引解析得到新版本号与元数据
+  > `bash .qoder/tmp/readback.sh pypi 0.3.0`（**7.2 定型的同一脚本、未改一行，仅切 mode**），退出码 **0**。腿 1：`available versions: 0.1.0 0.2.0 0.3.0`、`latest=0.3.0` → PASS
+- [x] 9.2 干净环境按版本号**精确安装**一次（`aeval-framework==<版本号>`）
+  > 腿 2：装前 `pip list` 基线为 `none installed (clean)`（零 aeval 残留），`aeval-framework[api,cli]==0.3.0` 从 `pypi.org/simple` 解析装成（依赖走镜像），`Successfully installed aeval-framework-0.3.0` + 26 个依赖（含 `typer-0.27.2`）；导入归属 `…\readback-env\Lib\site-packages\agent_eval\__init__.py` → PASS。**装的是公网索引那份，不是本地 wheel** —— 这正是 6.x 的干净环境验证覆盖不到的一层
+- [x] 9.3 装上后跑 `eval-suite run examples/minimal/suite.yaml`，核对退出码**与输出内容**
+  > 腿 3：exit code **0**，三条输出文本逐项命中 `Status: completed` / `valid=6 invalid=0 pending=0` / `Statistics version: 2`；并读到 `Denominator: valid=6 invalid=0 pending=0`、`Tasks: 2 Trials: 6`、Pass@3 与 Pass^1..3 均 100.0% [95% CI 61.0%..100.0%] → PASS
+- [x] 9.4 记一句判读：证据是"从索引回读成功并实跑通过"，**不是**"twine 返回 0"。中间任何一环都可能静默降级（镜像延迟、sdist 缺文件、平台 wheel 不匹配）
+  > 腿 4：`/v1/meta` 的 `version` 与 `X-Aeval-Version` 均 == 0.3.0 → PASS；总横幅 `READ-BACK OK` 仅在四腿全绿时印出。判读：**0.3.0 已对外可安装且可用**，证据链是"索引解析 → 公网精确安装 → 实跑输出内容比对 → 包内 API 自报同版本"四环，无一是"命令返回 0"。腿 1 的 `latest=0.3.0` 同时是 8.3 的上传完成证据
+- [x] 9.5 若回读失败：**不回收 tag、不重传版本号**（做不到），立即发补丁版本并在 CHANGELOG 记因
+  > **未触发** —— 四腿全绿，无需补丁版本。此条保留为失败路径的既定处置，不是已发生动作
 
 ## 10. 收尾与交接
 
-- [ ] 10.1 归档本变更（`openspec archive ship-the-accepted-tree`）；它 `skip_specs: true`，归档后 `openspec/specs/` 应无变化——**确认这一点**，若有变化说明本变更越界改了行为
+- [x] 10.1 归档本变更（`openspec archive ship-the-accepted-tree`）；它 `skip_specs: true`，归档后 `openspec/specs/` 应无变化——**确认这一点**，若有变化说明本变更越界改了行为
   > **待第 9 组回读确认后执行**（发布未被索引回读证实之前不收口）。归档前先记基数供对照：`openspec/specs/` 本次**一字未动**（`git status --porcelain openspec/specs` 空）。
+  > **执行与后置核对（2026-09-23 复核会话补记，非原实现会话）**：第 9 组四腿回读已通（见上），前置条件满足，故执行 `openspec archive ship-the-accepted-tree -y --skip-specs` → 归档为 `2026-09-23-ship-the-accepted-tree`。**后置核对：`git status --porcelain openspec/specs` 仍为空**，主 spec 一字未动，与本变更 `skip_specs: true` 一致；`openspec list` 已无活动变更。归档时 CLI 报的 "1 incomplete task" 即本条自身（先有归档动作才有勾选），非遗漏。
 - [x] 10.2 提交信息遵循 Conventional Commits，scope 用 `release`：`fix(release): ...` / `chore(release): ...`
   > 发布提交：`18eee13 chore(release): ship the accepted tree as 0.3.0 and backfill the missing ⑧ notes` —— scope `release`、类型 `chore`（本次不改行为，只收敛记录与制品），正文写的是"为什么"（17 天未发布 / 版本号是发布序列 / ⑧ 一段都没有 / 从构建物验证），并明确"零 `src/` 与测试改动"。tag `v0.3.0` 落在这个提交上。
   > 交接记录提交随后另起一笔（同为 `release` scope）；归档那笔沿用仓库既有形态 `chore(openspec): archive <change>`，与 `31c8cdc` 等先前归档提交一致。
