@@ -2,7 +2,9 @@
 # Distribution name: aeval-framework (PyPI). Python module: agent_eval, CLI: eval-suite.
 # (`agent-eval` on PyPI belongs to an unrelated project — UK AISI agenteval.)
 name = "aeval-framework"
-version = "0.3.0"
+# 版本只有一个真相源: src/agent_eval/__init__.py 的 __version__ (design D1)。
+# 手工写第二份 (旧的 pyproject `version =`) 才是缺陷 —— dynamic 让它无法被写出来。
+dynamic = ["version"]
 description = "Aeval — open-source agent evaluation framework driven by OTel traces (suites, graders, metrics, storage, API, CLI)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,6 +59,9 @@ Changelog = "https://github.com/QiYuyyds/Aeval/blob/main/CHANGELOG.md"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/agent_eval/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_eval"]

@@ -5,6 +5,20 @@ Aeval 的版本语义变更记录。格式遵循 [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-23
+
+> 发布后修复（变更 fix-version-drift-and-cli-entry-guard，来源 `ship-the-accepted-tree` 的 HANDOVER B 组第 5/6/7 条）。三处都在**已人人可装的 0.3.0 制品自身**上，不改评测口径：`statistics_version` 维持 2，判分链、`core/` 语义、存储与数据集零改动。对已装 `[cli]` 的用户零影响。
+
+### 修复（fix-version-drift-and-cli-entry-guard）
+
+- **版本号收敛为一个结构性真相源**：`pyproject.toml` 改用 `dynamic = ["version"]` 由 hatchling 从 `src/agent_eval/__init__.py:14` 读，先前的两处手工副本（`pyproject.toml:5` 与模块常量）就此只剩一处。**选结构不选测试**：加一条"断言两处相等"的测试等于承认可以不一致再事后抓，而 `version = ` 与 `dynamic = ["version"]` 并存时 hatchling 直接**构建失败**——不一致现在写不出来。已装形态与源码直跑两条解析路径实测给出同一值（`importlib.metadata` 腿与 `__version__` 回退腿各自量过）。
+- **挂载形态的接口文档版本自 v0.2.0 起一直误报 `0.1.0`**：`api/app.py` 的 `FastAPI(version=...)` 是一处硬编码字面量，绕过了**同文件早已存在**的 `package_version()`，于是宿主 `create_app()` 挂出去的那份 `/openapi.json` 的 `info.version` 与同一进程的 `/v1/meta`、`X-Aeval-Version` 各说一套——而错的那个正是别人用来对接的那份文档。改为走同一解析器，并加一条 AST 级静态断言钉住「`api/` 下不存在第二处版本字面量」（该断言在修复前是红的、且带位置报出，植入一处假字面量也被抓到）。两种部署形态与同一进程内五处出口（外层文档 / 内层文档 / `/v1/meta` / 版本头 / 寄宿 `/meta`）现读出同一个版本。
+- **裸装者手上的 `eval-suite` 从 traceback 变为指引**：`pip install aeval-framework`（不带 extras）照样生成 `eval-suite`——PEP 621 的 `[project.scripts]` 是项目级表，实现期实测确认**无任何受支持写法**能把 console script 绑到 extra 上（五种候选各试一遍，含被 hatchling 原样接受却被 pip 忽略的 `; extra == 'cli'` 标记）。所以"说清缺什么"是 MUST 而非 SHOULD：命令行入口的模块体不再碰 `typer`（实现体移入 `agent_eval/_cli_app.py`，入口点字符串 `agent_eval.cli:main` 原样不动），缺依赖时输出稳定标记 `error: missing-cli-dependency` 加可复制的 `pip install "aeval-framework[cli]"`，退出码 **4**（与 0/1/2/3 各自可判别，`docs/cli-reference.md` 已补这一行）。非依赖缺失的导入失败照原样抛出——指引不许盖住真 bug。**硬约束已量**：装齐依赖时九条命令面输出逐字节不变（改动前后同形对比 + 已发布 0.3.0 制品与本次构建物的产物级字节比对），`--help` 端到端 405ms vs 直调实现体 404ms，`typer` 两条路径各恰好导入一次。
+
+### 发行物验证
+
+- 干净环境四形态各跑一次并留 run 级证据：已发布 `0.3.0[api,cli]`（改前参照）、已发布 `0.3.0` core-only（改前崩溃现场）、本次构建物 `0.3.1[api,cli]`、本次构建物 core-only（命中指引、退出码 4）；`eval-suite run demo` 在真实安装产物与仓库工作树两侧结果一致。详见 `openspec/changes/` 内本变更第 5 组的记录。
+
 ## [0.3.0] — 2026-09-23
 
 > **版本标签映射说明**：下面各段标题原先写的「目标 0.3.0 / 0.4.0 / 0.5.0」，是在「0.3.0、0.4.0、0.5.0 会各自单独发布」的假设下分别记下的。该假设未成立——0.3.0 此前从未成为 tag 也从未上传 PyPI（实测索引最新稳定为 0.2.0），④⑤⑥⑦ 与 P0、⑧ 六个变更一直是同一坨未发布内容。版本号是**发布序列**不是**计划序列**，0.2.0 之后的下一个发行物只能是 0.3.0，故本批六个变更**同批以 0.3.0 发行**。**归档记录（`openspec/changes/archive/`）与各段本文一律不改写**，收敛只发生在这一层。
