@@ -44,7 +44,7 @@ def multi_tool_transcript() -> list[dict]:
 
 def _build_in_child(case: str, payload: dict) -> bytes:
     """在与测试进程相互独立的子进程里构建一次判分输入, 返回其 UTF-8 字节。"""
-    script = """
+    script = r"""
 import json, sys
 case, raw = sys.argv[1], json.loads(sys.argv[2])
 if case == "model_based_prompt":
@@ -56,6 +56,23 @@ elif case == "trajectory_block":
     from agent_eval.core.types import Observation
     from agent_eval.metrics.llm_judge import render_trajectory_block
     text = render_trajectory_block([Observation(**item) for item in raw["observations"]])
+elif case == "probe_variants":
+    from agent_eval.core.types import TrialResult
+    from agent_eval.graders.model_based import ModelBasedGrader
+    from agent_eval.graders.presentation_probes import (
+        DEFAULT_PROBE_OPERATORS,
+        JudgePresentation,
+    )
+
+    trial = TrialResult(trial_index=0, transcript=raw["transcript"])
+    presentation = JudgePresentation(raw["anchor_value"], tuple(raw["dimensions"]))
+    text = "\n".join(
+        ModelBasedGrader()._build_prompt(
+            trial, raw["rubric"], list(v.dimensions), anchor_value=v.anchor_value
+        )
+        for operator in DEFAULT_PROBE_OPERATORS
+        for v in operator.variants(presentation)
+    )
 else:
     raise SystemExit("unknown case: " + case)
 sys.stdout.buffer.write(text.encode("utf-8"))
@@ -111,6 +128,25 @@ class TestJudgePromptIsDeterministicAcrossProcesses:
         assert first == render_trajectory_block(
             [Observation(**item) for item in payload["observations"]]
         ).encode("utf-8")
+
+    def test_probe_variant_rendering_is_byte_identical_across_two_processes(self):
+        """呈现探针的变体构造纳入本文件的覆盖面 (change add-judge-presentation-probes 2.3)。
+
+        探针自己不得成为它要测的那个毛病: 同一份判分配置在两个进程里必须构造出
+        逐字节相同的四份判分输入 (基线 1 + 锚定变体 2 + 逆序变体 1, design D3)。
+        """
+        payload = {
+            "transcript": multi_tool_transcript(),
+            "rubric": "报告须含订单总数",
+            "dimensions": ["correctness", "completeness"],
+            "anchor_value": "0.0",
+        }
+        first = _build_in_child("probe_variants", payload)
+        second = _build_in_child("probe_variants", payload)
+        assert first == second, (first.decode("utf-8"), second.decode("utf-8"))
+        # 两个算子各自构造出来的呈现全都在这里 (锚定 3 + 次序 2); 跨算子去重到 4 次
+        # 调用是探针的事, 由 test_presentation_probes 的成本报价那条钉住
+        assert first.count("## 评分标准".encode()) == 5, "五份呈现都得以构造出来"
 
     def test_trajectory_block_only_holds_ordered_readings(self):
         """次序来自输入列表本身: 每条读数占一行、按声明次序编号, 不夹带任何派生清单。"""
