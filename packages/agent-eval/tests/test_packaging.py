@@ -401,7 +401,7 @@ class TestCliSourceForms:
     def test_run_tar_gz_source_completes(self, tmp_path):
         from typer.testing import CliRunner
 
-        from agent_eval.cli import app
+        from agent_eval._cli_app import app
 
         root = _make_pack(tmp_path)
         archive = _tar_pack(tmp_path, root, name="suite-pack.tar.gz")
@@ -417,7 +417,7 @@ class TestCliSourceForms:
 
         from typer.testing import CliRunner
 
-        from agent_eval.cli import app
+        from agent_eval._cli_app import app
 
         repo = tmp_path / "suite-repo"
         repo.mkdir()

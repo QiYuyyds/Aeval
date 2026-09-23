@@ -10,7 +10,7 @@ import re
 
 from typer.testing import CliRunner
 
-from agent_eval.cli import app
+from agent_eval._cli_app import app
 
 runner = CliRunner()
 
@@ -699,8 +699,8 @@ class TestServeSmoke:
     def test_serve_defaults_are_loopback(self):
         import inspect
 
-        from agent_eval import cli
+        from agent_eval import _cli_app
 
-        sig = inspect.signature(cli.serve)
+        sig = inspect.signature(_cli_app.serve)
         default = sig.parameters["host"].default
         assert getattr(default, "default", default) == "127.0.0.1"

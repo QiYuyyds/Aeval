@@ -44,8 +44,11 @@ eval-suite run <来源> [选项]
 | 1 | agent 表现：存在未通过任务，或基线门判显著变差 / 不可比 / 不可判（见下文「基线门」） |
 | 2 | 用法错误：runner 或 `--vocabulary` 未知等参数问题 |
 | 3 | **评测本身不可信**：`invalid` 占比超 `--invalid-limit`，或关键统计量为 `insufficient_data`（无有效 trial 进入分母） |
+| 4 | **命令行依赖缺失**：装的是不含 `[cli]` 的形态，与评测结果无关 |
 
 退出码 3 输出 `NOT PASSABLE - evaluation reliability problem (not an agent performance result)` 并逐条列出原因：它是评测配置的故障，**不是** agent 退化的结论，因此不复用退出码 1。
+
+退出码 4 存在的原因很实在：`eval-suite` 这个可执行文件由**每一种**安装形态生成（PEP 621 的 `[project.scripts]` 是项目级表，无法声明成「装了某个 extra 才有」），所以只装 core 的人手上也有这条命令。它不会抛指向内部依赖的 traceback，而是先输出稳定标记 `error: missing-cli-dependency` 再给出可复制的安装表达式（`pip install "aeval-framework[cli]"`）。脚本要区分「评测跑失败了」与「装错形态了」，认 4 或认这一行即可。
 
 自定义 runner 通过 entry-point 注册（见接入指南 §2），例如：
 

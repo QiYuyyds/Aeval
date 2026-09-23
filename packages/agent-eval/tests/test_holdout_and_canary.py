@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from agent_eval.cli import app
+from agent_eval._cli_app import app
 from agent_eval.core.runner import EvalRunner, NoRunnableTasksError
 from agent_eval.core.suite import SuiteLoadError, load_suite
 from agent_eval.core.types import RunResult

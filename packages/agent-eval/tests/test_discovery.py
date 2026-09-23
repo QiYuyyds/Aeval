@@ -221,7 +221,7 @@ def test_same_name_conflict_raises_listing_both_sources(monkeypatch):
 
 def test_cli_extensions_listing_shows_builtin_and_discovered(monkeypatch):
     """eval-suite extensions: 内置 + 被发现的 (标注来源包)。"""
-    from agent_eval.cli import app
+    from agent_eval._cli_app import app
 
     patch_entry_points(
         monkeypatch,
@@ -240,8 +240,8 @@ def test_cli_extensions_listing_shows_builtin_and_discovered(monkeypatch):
 
 def test_cli_and_rest_meta_list_same_names(monkeypatch):
     """CLI 清单与 /meta 能力清单给出的自定义判据名字集合相同。"""
+    from agent_eval._cli_app import app
     from agent_eval.api.app import meta_payload
-    from agent_eval.cli import app
 
     patch_entry_points(
         monkeypatch,
