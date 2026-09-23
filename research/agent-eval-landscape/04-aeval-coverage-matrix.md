@@ -19,7 +19,7 @@ OTel trace 驱动的开源 agent 评测框架：YAML 声明套件（严格校验
 | 5 | OTel GenAI 底座（仍 experimental） | 版本钉定翻译表 + otel-genai/openinference 双预设 + fail-fast | **领先**（设计恰中靶心） | `trace/mapping.py`、`trace/normalize.py` |
 | 6 | 成本/时延一等轴 | 四路 token + 外部价目 + "不可算≠0" + passed/failed 分列 + 跨 run 趋势 | **领先** | `core/pricing.py`、`core/metrics.py` |
 | 7 | 多 judge 信度（κ/α 进工具 UX） | 变更④进行中（35/38）：κ/α + 自一致/信度两类分开 | **持平/进行中** | `openspec/changes/add-agent-metric-catalog` |
-| 8 | Judge 偏差缓解（swap/顺序随机化/长度控制） | 无；judge 单调用单顺序 | **缺失** | grep：swap/position_bias 无命中 |
+| 8 | Judge 偏差缓解（swap/顺序随机化/长度控制） | 呈现探针已具备：同一 judge 就同一份归档证据被 N 份呈现重问，报**结论**翻不翻（`anchor_value` / `dimension_order`，库层入口、只出诊断、不进任何分母与门禁）；swap 仍无宿主 | **部分**（探针机制已具备、**幅度未测**——真实锚定敏感度要一把可用的 judge 凭证；仍**不具备**成对比较位置偏置的缓解，框架内没有成对比较判据） | `graders/presentation_probes.py`、`core/metrics.py`（复用 ④ 的 κ/α） |
 | 9 | 结构化 rubric 清单评分器 | rubric 为自由文本整体发 judge | **部分** | `graders/model_based.py:150` |
 | 10 | Judge 校准闭环（人工金标 → 一致率 → 用/不用） | human grader 有 REST 回调；无金标集工作流 | **部分** | `graders/human.py` |
 | 11 | 用户模拟器 / 双控（τ²-bench 模型） | 单轮静态 `prompt` 字符串 | **缺失** | `docs/yaml-format.md`（任务模型） |
@@ -48,7 +48,7 @@ OTel trace 驱动的开源 agent 评测框架：YAML 声明套件（严格校验
  OTel GenAI 词汇                 █████████  领先（双预设+钉版本）
  多 judge 一致性 κ/α             ███████░   进行中（变更④）
  结构化 rubric 清单评分           ███░░░░░░░ 只有自由文本 rubric
- judge 偏差缓解（swap/集集成）    █░░░░░░░░░ 仅测量（κ/α），无缓解
+ judge 偏差缓解（swap/集集成）    ██░░░░░░░░ 探针机制已具备，幅度未测；swap 无宿主
  用户模拟器 / 双控              █░░░░░░░░░ 单轮静态 prompt
  动态事件 / 中途干预             █░░░░░░░░░ setup→run→teardown 单发
  长时程 checkpoint/续跑          ░░░░░░░░░░ 无
@@ -70,4 +70,5 @@ OTel trace 驱动的开源 agent 评测框架：YAML 声明套件（严格校验
 ## 快照后的增量
 
 - **2026-09-22 · 第 4 行的隐含前提已闭合**：「采集/评分分离 + 重放审计」此前有一块没写出来的洞——`model_based` 把工具清单以 `list(set(...))` 拼进提示词，而字符串 hash 按进程随机化，所以"对同一批归档字节重评"在不同进程里喂给 judge 的东西本就不相同。变更 `make-judge-prompt-deterministic` 修掉它（判分输入成为归档证据的纯函数 + 真起子进程的逐字节守护测试 + 评分器版本 2→3 使翻转可单独归因）。矩阵上半部的评级不变，但第 4 行的承诺从此真正成立，且「judge 偏差缓解」（第 8 行）第一次有了可测的前提。
+- **2026-09-22 · 第 8 行由「缺失」改评「部分」**：变更 `add-judge-presentation-probes` 建的是**测量能力**，不是缓解——判分器现在可以被「只改不该影响结论的呈现细节」的方式重问，并报告结论是否随之翻转（κ/α 复用 ④ 的数学，另立一个报告类型，不与跨评分者信度合成一个数）。**幅度今天没测**：真实锚定敏感度要一把可用的 judge 凭证，宿主四把候选全为 401/402（与 P0 的 tasks 6.2 同一手）；入口已入库（`examples/presentation-probes/`），凭证恢复后直接重跑，不需要新的设计决定。这一行不给「领先」，因为测得到 ≠ 测过了；也不给「已缓解」，因为成对比较位置偏置那一类仍无宿主（框架内没有成对比较判据）。修锚、探针的 YAML/CLI 表面、跨 run 敏感性趋势三件事都排在第一次真测量之后。
 - 本文件仍是 **2026-09-07 快照**，另有 7 行已过期（⑤⑥⑦ 落地后：用户模拟器、事件注入、套件分发、基线门等）。逐行回填属独立工作，不在上述变更范围内。

@@ -187,6 +187,7 @@ class MyGrader:
 - `dimensions` 为空 → `invalid` / `no_criteria_configured`
 - 平均分按**配置的全集维度数**为分母：judge 漏答某个维度按 0 计入，不会因缺席而抬高分数
 - 判分输入对同一份归档证据**确定**：同一批字节在任何进程里重评都构造出逐字节相同的提示词（自 `implementation_version` 3 起；此前工具清单按集合迭代序拼接，跨进程会变）
+- 示例 JSON 里的预填值（`{"quality": 0.0}`）是框架自己写进提示词的一个**显式锚**，它对结论有没有影响现在**可测**：见下方「判分呈现探针」（`run_presentation_probes`）。默认呈现逐字节未变，`implementation_version` 因此仍是 3
 
 ## state_check（type: state）— 环境状态检查
 
@@ -360,3 +361,67 @@ curl http://localhost:8000/api/eval/graders     # 或独立部署 /v1/graders
 ## 模拟器读数的来源级别（0.4.0）
 
 用户模拟器产出的每一条话术、注入的环境事件、人工介入消息都以 `observed_by: harness` 带 `observed_at` 时刻进入 transcript 证据（通道分别为 `simulated_user` / `environment_event` / `human_message`），与普通消息可区分。来源记 harness 而非 runner 的理由：**轮次的供给方是评测侧框架**（框架经模拟器协议供给、经会话句柄交付），不是被评方或接入适配层自报 —— 模拟用户说「我确认修好了」不该被当成被评系统完成了什么。判据取信模拟话术不需要 `allow_subject` 放行。
+
+## 判分呈现探针 —— 同一个 judge 对无关呈现敏不敏感（0.4.0）
+
+κ 高不等于准：两个 judge 若共享同一个偏置，它们**一致地错**，而评分者间信度对此完全无感。呈现探针问的是第三类量 —— **同一个 judge 在不该影响结论的呈现变化下，结论稳不稳**。
+
+它是**库层入口**，无 YAML / CLI / REST / 看板表面、不落库：探针的配置形状正是第一次测量要 inform 的东西，在量过一次之前把它写进 YAML 等于承诺一个没验证过的形状。
+
+```python
+from agent_eval.graders.model_based import ModelBasedGrader
+from agent_eval.graders.presentation_probes import (
+    presentation_probe_cost_quote,
+    run_presentation_probes,
+)
+
+quote = presentation_probe_cost_quote(n_trials=len(trials), sample=0.5)
+# → {'variants_per_trial': 4, 'trials_sampled': 3, 'judge_calls': 12}
+report = run_presentation_probes(
+    ModelBasedGrader(llm_fn=judge),      # 与生产同一把 judge、同一份判分口径
+    task=task,
+    trials=trials,
+    sample=0.5,                          # 必填：内核不给默认抽样比例
+    seed=20260922,                       # 必填：抽样本身要可复现
+)
+for name, op in report.by_operator.items():
+    print(name, op.status, op.flipped_trials, op.reason)
+```
+
+探针按定义是 judge 调用的乘法（默认两个算子 = 每个抽中 trial 4 次调用：基线 1 + 锚定变体 2 + 逆序变体 1），所以**报价给在调用点**，不藏进配置。跑之前先报价、跑完之后记实耗。
+
+### 算子 = 一句「保持什么不变」+ 一份变体构造
+
+一个呈现算子必须声明它保持的不变量；**说不清保持什么的改动在构造期就被拒绝**（`ValueError`），不留到运行时产出一个没人读得懂的数。协议里**没有**第三方注册面（无 entry-point 组）—— 泛化性由第二个算子证明，不由扩展点承诺。判读表（七个候选，纳入两个）：
+
+| 候选算子 | 保持的不变量 | 判定 |
+|---|---|---|
+| `anchor_value` | 模板示例值只是格式说明，不该进分数 | **纳入**，首个 |
+| `dimension_order` | 各维度独立打分后取平均；**求和次序造成的末位浮点差异不计为呈现敏感** | **纳入**，第二个（带此限定） |
+| `irrelevant_prefix` | 无关内容不该改变结论 | 不纳入：构造「无关但等长」的前缀本身就是新变量 |
+| `head_trunc` / `tail_trunc` | —— 轨迹的时间序**就是**语义 | 不纳入：破坏不变量，测出来无法归因到呈现 |
+| `label_polarity` | 说不清保持什么 | **拒绝成为算子** |
+| `paraphrase` | 引入了改写器这个新变量 | 不纳入 |
+| `candidate_order` | 无宿主（框架内没有成对比较判据） | 无处安放 |
+
+`dimension_order` 那句限定不是脚注：`_parse_scores` 按 `for dim in dimensions` 建字典，于是 `sum(scores.values())` 的求和序就是呈现序，而浮点加法不可结合。框架在同一份配置下今天是确定性的、没有待修缺陷 —— **为一个测试工具去改生产算术是反的**，所以求和方式原样保留，改由算子声明与报告输出携带那句限定（`tests/test_presentation_probes.py::TestProbeOffChangesNothing::test_summation_order_follows_the_presentation_not_the_argument`）。
+
+### 测结论翻转，不测分数漂移
+
+进分母的是**通过/失败**：只有结论跨过 `threshold` 才算翻，与统计口径同源。分数移动量作为另一维度单独呈现（`max_score_shift` / `mean_score_shift`）—— 它决定「要不要修」的紧迫度，不决定「敏不敏感」的答案。0.78 → 0.72 而阈值 0.7 不算翻转。
+
+呈现不变性与两类既有信度量各占一个类型、各报各的数，**不得合成一个综合信度分**：`AgreementReport`（两个评分者之间）、单评分者多采样的 `confidence`（自一致）、`PresentationInvarianceReport`（同一评分者的不同呈现）。三态措辞固定，不共用一个空值：
+
+- `sensitive` —— 检出结论翻转。翻了几判是直接观察到的事实，样本不足也不能把它读成「没翻」；
+- `not_detected` —— 测过了且未检出，**这是一条结论**，且只在算子声明的那个不变量内成立；
+- `not_computable` —— 没测出来：judge 不可用（含无凭证）、无可读读数，或对齐样本 < `MIN_ALIGNED_RATINGS_FOR_AGREEMENT`。把「未检出」与「不可计算」混成一个空值，等于把没测过伪装成已排除。
+
+### 探针不产出结论（硬规则）
+
+探针的读数不是判定条目：不产生 `GraderResult` / `TrialResult`、不进 `grade_attempts`、不移动 `current` 指针、不进任何分母或门禁，也不给 `CALIBER_AXES` 添第六根轴（探针不产出 verdict，没有翻判要归因）。一旦混进判定序列，`verdict_drift` 就会把一次呈现扰动读成「judge 换代翻了 N 个 trial」，伪造出审计结论。守护在 `tests/test_presentation_probes.py`，并用一次测试侧的泄漏模拟证明它看得见泄漏（把「注回缺陷再确认变红」的常规手法放进测试而不是生产代码，因为那条「缺陷」恰好是 spec 明令 MUST NOT 的行为）。
+
+### 这套数字证明什么、不证明什么
+
+机制双向钉死用两个构造性替身：判据按定义对锚定值反应的替身**必须**被报出敏感；只读证据正文的替身**必须**不被误报。两者合起来只证明机制有效，**不证明真实 judge 敏感或不敏感**。真实锚定敏感度要等一把可用的 judge 凭证（宿主四把候选截至 2026-09-22 全为 401/402）；有凭证后直接重跑 `examples/presentation-probes/measure_presentation_sensitivity.py`，不需要新的设计决定。
+
+零凭证下已经量到的一条实现事实：在 judge 真会给出的一位小数分值上（长度 ≤ 5 的全部组合，即判据的实际维度数量级）与两位小数的三元组全部排列上，逆序求和与正序**逐位相同** —— 所以 `dimension_order` 这一轴今天构造不出由算术引起的结论翻转；限定语仍随报告输出，因为下一个人无法自行推断这件事，他只能相信报告说的话。
