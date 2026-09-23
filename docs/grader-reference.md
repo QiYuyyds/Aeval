@@ -345,7 +345,7 @@ curl http://localhost:8000/api/eval/graders     # 或独立部署 /v1/graders
 
 配 κ/α 时有两个实践前提：**对齐样本 ≥ 5**（`MIN_ALIGNED_RATINGS_FOR_AGREEMENT`；对齐样本 = 有 ≥2 个评分者都给出判定的 trial 数，所以 3 次 trial 的两评分者面板只会拿到 `insufficient_data`），以及**各评分者的阈值要跨过指标实际分数带**——阈值都落在分数带同一侧时评分者永远判定一致，κ 退化成 1.0，量不出分歧。
 
-## 新判定时刻：`after_last_event`（0.4.0）
+## 新判定时刻：`after_last_event`（0.3.0）
 
 `state_check` 的 `judgment_moment` 新增取值 `after_last_event`：只依据**最后一个注入事件之后**的环境读数判定 —— 「建完文件又删掉」这类被事件中断的时序不再需要只看终态。取值集合变为 `at_end`（默认）/ `not_at_end` / `any_time` / `after_last_event`，新增值非破坏，历史结论读回不变。
 
@@ -354,15 +354,15 @@ curl http://localhost:8000/api/eval/graders     # 或独立部署 /v1/graders
 - 声明了 `after_last_event` 但该 trial **没有注入任何事件** → 证据不足，缺失原因 `no_event_injected`；
 - 有事件但最后事件之后没有环境读数 → 证据不足，缺失原因 `no_state_reading_after_event`。
 
-## 轮级过程量只进诊断块（0.4.0）
+## 轮级过程量只进诊断块（0.3.0）
 
 多轮 trial 的轮级过程量（声明/消费轮数、注入事件数、人工介入数、会话结束原因 `end_reason`）随 trial 落盘为 `session_diagnostics`，只呈现在报告的诊断块（CLI `show --verbose` 展开处），**不进通过率、pass^k、任何分母** —— pass@k 的分母是 trial 数，不是轮数。
 
-## 模拟器读数的来源级别（0.4.0）
+## 模拟器读数的来源级别（0.3.0）
 
 用户模拟器产出的每一条话术、注入的环境事件、人工介入消息都以 `observed_by: harness` 带 `observed_at` 时刻进入 transcript 证据（通道分别为 `simulated_user` / `environment_event` / `human_message`），与普通消息可区分。来源记 harness 而非 runner 的理由：**轮次的供给方是评测侧框架**（框架经模拟器协议供给、经会话句柄交付），不是被评方或接入适配层自报 —— 模拟用户说「我确认修好了」不该被当成被评系统完成了什么。判据取信模拟话术不需要 `allow_subject` 放行。
 
-## 判分呈现探针 —— 同一个 judge 对无关呈现敏不敏感（0.4.0）
+## 判分呈现探针 —— 同一个 judge 对无关呈现敏不敏感（0.3.0）
 
 κ 高不等于准：两个 judge 若共享同一个偏置，它们**一致地错**，而评分者间信度对此完全无感。呈现探针问的是第三类量 —— **同一个 judge 在不该影响结论的呈现变化下，结论稳不稳**。
 

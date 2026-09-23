@@ -178,7 +178,7 @@ tasks:                        # 必填, 至少 1 个任务
 
 task 级声明仅诊断运行的指标名（从 runner 的 `metrics_registry` 解析）。其分值与分布摘要进入汇总的诊断块（CLI 默认折叠、`--verbose` 展开；报告同理），**不进通过率、pass^k、任何分母与判分聚合** —— 启用与否不改变历史口径。被本 task 判据显式引用（`type: metric`）的指标视为已升格，不再重复诊断运行。
 
-## 会话维度：`conversation`（0.4.0）
+## 会话维度：`conversation`（0.3.0）
 
 task 级可选声明，把单轮任务变成多轮会话。`prompt` 保持必填，语义收窄为**首轮用户输入**；其后的轮次由 `conversation` 决定。`conversation` 缺省时行为与本节加入前逐位一致。
 
@@ -212,12 +212,12 @@ tasks:
 | 会话进行中收到取消 | 证据照常落盘并标注取消终止，该 trial 不进通过率分母 |
 | 轮数与分母 | 一次多轮 trial 仍是一次 `run()` 调用、一条分母记录；`statistics_version` 维持 2 |
 
-## 环境声明：`task.environment` 与 `suite.environment`（0.4.0）
+## 环境声明：`task.environment` 与 `suite.environment`（0.3.0）
 
 - `task.environment`（可选）：`{id, version, fixture}`，环境初始态声明。框架不改签名，仍按既有 `EnvironmentManager.setup(task)` 把完整 task 句柄递给环境实现，fixture 如何消费由环境自定。声明会随证据边界落盘（`environment_identity` / `environment_version`），使「同一结论出自同一个环境」可核对。
 - `suite.environment`（可选）：环境管理器的注册名（经 `agent_eval.environments` entry-point 组发现）。引用未注册名字 → 装配期报错并列出可用名字。声明了环境状态检查判据（`type: state`）却未装配任何环境 → 该判据报证据不足并说明缺环境装配，不折成被评方失败。
 - 两个 run 的环境身份或初始态版本不同 → `eval-suite compare` 与 `/compare` 判不可比（`not_comparable_reason`），不把环境差异归给 agent。
-## 公开发布卫生：`holdout` 与 `canary_guid`（0.5.0）
+## 公开发布卫生：`holdout` 与 `canary_guid`（0.3.0）
 
 把套件当公开数据集发布之前，污染卫生是第一道工序。两个规范字段承载这件事：
 

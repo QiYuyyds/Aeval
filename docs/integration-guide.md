@@ -443,7 +443,7 @@ class StepWasteMetric(Metric):
 
 注入约定不变：runner 把 `llm_fn` 注入未自行配置的指标。0.3.0 起同时注入 `redactor`（脱敏钩子）—— 轨迹进 judge 提示词前应经 `self.redactor` 处理（`HashingEvidenceRedactor` 幂等，重复应用无副作用）。
 
-## 12. UserSimulator（可选，0.4.0）
+## 12. UserSimulator（可选，0.3.0）
 
 目标驱动会话需要模拟器时实现同一个协议（预写话术不需要 —— 框架内置 `ScriptedUserSimulator`，零模型调用）：
 
@@ -481,9 +481,9 @@ class SocraticSimulator:
 - 每句话术连同时刻与所用提示词（经脱敏）进证据，供事后复核；
 - 注册名经 `agent_eval.simulators` entry-point 组上架（见 §13），套件里用 `conversation.simulator: <名字>` 引用；不指定则用内置目标驱动模拟器。
 
-## 13. entry-point 发现：把自定义判据/环境/模拟器上架命令行（0.4.0）
+## 13. entry-point 发现：把自定义判据/环境/模拟器上架命令行（0.3.0）
 
-v0.3.0 及之前，自定义 grader 只能在库层注入 `EvalRunner(graders=[...])`，`eval-suite run` 拿不到。0.4.0 起通过 entry-point 组发现，**命令行与 API 读同一份注册结果**：
+0.2.x 及之前，自定义 grader 只能在库层注入 `EvalRunner(graders=[...])`，`eval-suite run` 拿不到。0.3.0 起通过 entry-point 组发现，**命令行与 API 读同一份注册结果**：
 
 | entry-point 组 | 装配目标 | 套件引用方式 |
 | --- | --- | --- |
@@ -609,7 +609,7 @@ eval-suite run replay-suite.yaml --baseline <基线 run_id>
 **边界**：定时触发、告警通知、结果看板都不在框架内——调度是外部 CI 的
 职责，框架只负责一次 run 与一次门判定。
 
-## 15. 套件分发：pack 与 git URL 来源（0.5.0）
+## 15. 套件分发：pack 与 git URL 来源（0.3.0）
 
 套件要跨仓库/跨团队复用时，不必再"传一个 YAML + 口头约定资产"——把它做成
 **pack**（套件包）再分发。`run` 与 `validate` 的来源参数共用同一套解析

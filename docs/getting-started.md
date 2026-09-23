@@ -168,6 +168,16 @@ class MyAgentRunner:
    API 里既有的 `trials[].score` 语义不变（仍是 grader 简均，为兼容保留），两者会
    在门塌缩时不同；该字段落盘前的历史 run 读回为 `None`，呈现层自动回退简均。
 
+### 其余可选新增（无协议断裂）
+
+上面五条是破坏面；这一批新增**一个协议都没动**：`AgentRunner` / `EnvironmentManager` / `Grader` 签名一律未变，不含会话声明的既有套件加载与运行结果逐位一致。新增能力全部可选：
+
+1. **`prompt` 语义收窄**。`prompt` 保持必填，语义为首轮用户输入；后续轮次由 task 级 `conversation`（`turns` 预写话术 / `goal` 目标驱动，两者互斥）决定。不声明 `conversation` 的套件行为不变。
+2. **轮数不进分母**。一次多轮 trial 仍是一次 `run()` 调用、一条分母记录，`statistics_version` 维持 2 —— 新旧 run 的通过率逐字段可比。适配器未消费完声明轮次即返回 → 该 trial 判 `invalid`（`conversation_not_consumed`），错误点名适配器与消费轮数。
+3. **环境身份进证据边界**。EvidenceBoundary 新增 `environment_identity` / `environment_version`；无环境参与显式记 `none`。**历史 run 该字段读回为空（None）**，与「记录了环境身份的 run」比较时判不可比 —— 这是刻意的：没有环境记录就无法核对两份结论是否出自同一环境。
+4. **跨 trial 环境复用与被评方断点续跑显式未做**。环境仍 per-trial 建/拆；重放是**离线**的（用户侧输入序列落盘，重评分被评系统调用为零），不含「接着上次运行继续跑」。
+5. **新 CLI 命令 `eval-suite extensions`**：列出本次运行真正可用的扩展点及其来源包；自定义判据/环境/模拟器可经 entry-point 组上架命令行（见[接入指南 §13](./integration-guide.md)）。
+
 ## 下一步
 
 - [YAML 格式](./yaml-format.md) — 套件怎么写
@@ -175,13 +185,3 @@ class MyAgentRunner:
 - [CLI 参考](./cli-reference.md) — 全部命令与选项
 - [架构](./architecture.md) — 模块与数据流
 - [回放线上流量](./integration-guide.md#14-回放线上流量trace--任务--套件--定时回归) — 从生产 trace 挖任务、套件化、定时回归（可跑示例：[examples/trace-replay](../examples/trace-replay/)）
-
-## 升级到 0.4.0（从 0.3.x）
-
-0.4.0 **无协议断裂**：`AgentRunner` / `EnvironmentManager` / `Grader` 签名一律未动，不含会话声明的既有套件加载与运行结果逐位一致。新增能力全部可选：
-
-1. **`prompt` 语义收窄**。`prompt` 保持必填，语义为首轮用户输入；后续轮次由 task 级 `conversation`（`turns` 预写话术 / `goal` 目标驱动，两者互斥）决定。不声明 `conversation` 的套件行为不变。
-2. **轮数不进分母**。一次多轮 trial 仍是一次 `run()` 调用、一条分母记录，`statistics_version` 维持 2 —— 新旧 run 的通过率逐字段可比。适配器未消费完声明轮次即返回 → 该 trial 判 `invalid`（`conversation_not_consumed`），错误点名适配器与消费轮数。
-3. **环境身份进证据边界**。EvidenceBoundary 新增 `environment_identity` / `environment_version`；无环境参与显式记 `none`。**历史 run 该字段读回为空（None）**，与「记录了环境身份的 run」比较时判不可比 —— 这是刻意的：没有环境记录就无法核对两份结论是否出自同一环境。
-4. **跨 trial 环境复用与被评方断点续跑显式未做**。环境仍 per-trial 建/拆；重放是**离线**的（用户侧输入序列落盘，重评分被评系统调用为零），不含「接着上次运行继续跑」。
-5. **新 CLI 命令 `eval-suite extensions`**：列出本次运行真正可用的扩展点及其来源包；自定义判据/环境/模拟器可经 entry-point 组上架命令行（见[接入指南 §13](./integration-guide.md)）。
