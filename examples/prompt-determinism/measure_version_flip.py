@@ -208,7 +208,11 @@ async def measure(pre_fix_cls) -> dict[str, Any]:
         ],
         "before_success": before_success,
         "after_success": after_success,
-        "flips_observed": sum(1 for a, b in zip(before_success, after_success) if a != b),
+        "flips_observed": sum(
+            1
+            for a, b in zip(before_success, after_success, strict=True)
+            if a != b
+        ),
         "other_caliber_axes_equal": all(
             a[0].judge_models == a[1].judge_models
             and a[0].mapping_version == a[1].mapping_version

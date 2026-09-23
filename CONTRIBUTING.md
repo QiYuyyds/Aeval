@@ -22,6 +22,7 @@ pip install -e "packages/agent-eval[api,cli,dev]"
 cd packages/agent-eval
 pytest tests/ -q                 # run the test suite
 ruff check src tests             # lint
+ruff check ../examples --config pyproject.toml   # CI lints examples/ too
 ```
 
 The offline test suite needs no external services; a handful of LLM-judge tests are skipped unless API credentials are present.

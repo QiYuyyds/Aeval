@@ -40,7 +40,8 @@ context: |
   不要因目录缺失而删词，也不要在没有 spec 文件时假装它已定义。
   注：openspec/specs/ 自 v0.3.0 起由首个归档变更逐步填充；后续提案复用已有路径，不新增域层级。
 
-  验证门：cd packages/agent-eval && pytest tests/ -q ；ruff check packages/agent-eval ；
+  验证门：cd packages/agent-eval && pytest tests/ -q ；ruff check packages/agent-eval 且
+  ruff check examples --config packages/agent-eval/pyproject.toml（CI 两条都跑，只跑前者会漏掉 examples/）；
   前端 pnpm --filter eval-dashboard build。离线测试无需外部服务，缺 API 凭据时 LLM-judge 用例自动 skip。
   测试策略：core 统计/suite 校验/graders/storage 纯单元（覆盖率目标 ≥90%）；MockRunner 端到端覆盖超时/重试/依赖跳过/泄漏矩阵；API 用 TestClient + 挂载回归。
   提交约定：Conventional Commits，scope 取能力名，如 fix(cli): / feat(graders): / fix(release):。

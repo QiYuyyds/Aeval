@@ -1,0 +1,9 @@
+# starter pack 的每个文件都由 manifest.json 以 sha256 逐字节钉住，而校验和比对发生在
+# 三条路径上：`eval-suite run demo` 读包内副本、tests/test_packaging.py 比仓库侧与包侧
+# 同源、pack 形态的完整性校验。git 的行尾转换会让"检出的字节"不等于"仓库里的字节"，
+# 于是 Windows 上 `git clone` 之后 `eval-suite run demo` 必然报"校验和不符合"，
+# 在 Windows 上构建 wheel 还会把 CRLF 的 pack 连同钉着 LF 哈希的 manifest 一起发出去。
+#
+# -text 关掉转换（不是 eol=lf：这里要的不是某种行尾，而是"按原始字节检出"）。
+packs/**                                    -text
+packages/agent-eval/src/agent_eval/packs/** -text
