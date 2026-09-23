@@ -184,7 +184,7 @@ def create_app(runner: EvalRunner | None = None) -> FastAPI:
     """
     app = FastAPI(
         title="Aeval API",
-        version="0.1.0",
+        version=package_version(),
         description="Agent Evaluation Framework API",
     )
 
